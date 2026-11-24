@@ -6,7 +6,7 @@ exclude = ["quest"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MIT AND LicenseRef-Commons-Clause-1.0"
 
 [profile.release]
 debug = 1
