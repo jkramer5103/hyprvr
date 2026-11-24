@@ -1,0 +1,32 @@
+[package]
+name = "hyprvr-quest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.105"
+fontdue = "0.9.5"
+glam = "0.34.3"
+glow = "0.18.0"
+hex = "0.4.3"
+hyprvr-proto = { version = "0.1.0", path = "../../crates/proto" }
+hyprvr-quest-core = { version = "0.1.0", path = "../core" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2.191"
+log = "0.4.35"
+openxr = { version = "0.22.0", features = ["loaded"] }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+toml = "1.2.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+android_logger = "0.15.1"
+khronos-egl = { version = "6.0.0", features = ["static", "no-pkg-config"] }
+ndk = { version = "0.9.0", features = ["media", "audio", "api-level-29"] }
+ndk-sys = "0.6.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
