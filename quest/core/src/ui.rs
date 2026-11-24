@@ -107,6 +107,8 @@ pub struct ToolbarState {
     pub env_name: String,
     pub stats_on: bool,
     pub hover_on: bool,
+    /// Current environment is an image (it can be rotated).
+    pub env_is_image: bool,
     pub cutout_on: bool,
     pub cutout_exists: bool,
     pub can_add: bool,
@@ -164,6 +166,9 @@ pub fn toolbar(s: &ToolbarState) -> UiPanel {
     tiles.push(tile("Layout", "Recenter".into(), false, Action::Recenter));
     tiles.push(tile("Audio", if s.audio_headset { "Headset" } else { "Laptop" }.into(), s.audio_headset, Action::ToggleAudio));
     tiles.push(tile("Environment", pretty_name(&s.env_name), false, Action::EnvPicker));
+    if s.env_is_image {
+        tiles.push(tile("Environment", "Rotate 90°".into(), false, Action::EnvRotate));
+    }
     // Slot for the dim slider.
     let slider_slot = tiles.len();
     tiles.push(tile("", String::new(), false, Action::Dim));
@@ -641,7 +646,7 @@ mod tests {
         let mut painter = Painter::new();
         for (name, s) in [
             ("basic", ToolbarState { dim: 0.67, env_name: "the_sky_is_on_fire.jpg".into(), can_add: true, info: vec!["jk-laptop3  ·  2 screens".into()], ..Default::default() }),
-            ("full", ToolbarState { dim: 0.2, env_name: "Passthrough".into(), can_add: true, cutout_exists: true, cutout_on: true, hover_on: true, stats_on: true, audio_headset: true, info: vec!["jk-laptop3  ·  3 screens".into()] }),
+            ("full", ToolbarState { env_is_image: true, dim: 0.2, env_name: "Passthrough".into(), can_add: true, cutout_exists: true, cutout_on: true, hover_on: true, stats_on: true, audio_headset: true, info: vec!["jk-laptop3  ·  3 screens".into()] }),
         ] {
             let p = toolbar(&s);
             for w in &p.widgets {

@@ -1612,6 +1612,7 @@ impl App {
                     env_name,
                     stats_on: self.settings.show_stats,
                     hover_on: self.settings.laser_hover,
+                    env_is_image: matches!(self.settings.environment, Environment::Image(_)),
                     cutout_on: self.settings.keyboard_cutout.is_some_and(|c| c.enabled),
                     cutout_exists: self.settings.keyboard_cutout.is_some(),
                     can_add: n < MAX_SCREENS,
