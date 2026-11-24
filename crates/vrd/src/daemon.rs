@@ -420,20 +420,28 @@ impl Daemon {
         if !inner.outputs_live {
             return;
         }
+        // Every screen shown in VR (virtual or a mirrored monitor) is placed after its 3D
+        // position, so moving the mouse across follows what the user sees. Physical monitors
+        // not shown in VR keep their arrangement and go below.
         let mut panels = vec![];
+        let mut in_vr: Vec<&str> = vec![];
         for (i, s) in inner.screens.iter().enumerate() {
-            if let (true, Some(o)) = (s.is_virtual(), &s.output) {
-                panels.push(SyncPanel {
-                    output: o.clone(),
-                    width: s.width as i32,
-                    height: s.height as i32,
-                    layout: inner.store.layout[i],
-                });
-            }
+            let Some(o) = &s.output else { continue };
+            let (width, height) = if s.is_virtual() {
+                (s.width as i32, s.height as i32)
+            } else {
+                match inner.physical.iter().find(|m| &m.name == o) {
+                    Some(m) => m.logical_size(),
+                    None => continue,
+                }
+            };
+            in_vr.push(o);
+            panels.push(SyncPanel { output: o.clone(), width, height, layout: inner.store.layout[i] });
         }
         let physical: Vec<SyncPhysical> = inner
             .physical
             .iter()
+            .filter(|m| !in_vr.contains(&m.name.as_str()))
             .map(|m| {
                 // Lay out physical monitors from their original arrangement.
                 let (x, y) = inner

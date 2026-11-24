@@ -170,7 +170,13 @@ fn run(rx: mpsc::Receiver<Vec<String>>, ok: &mpsc::Sender<Result<(), String>>, e
                         s.hotspot = h;
                     }
                     let rgba = to_rgba(shm_file.as_slice(), *bw, *bh, *fmt);
-                    let ev = CursorEvent::Shape { width: *bw, height: *bh, hot_x: s.hotspot.0, hot_y: s.hotspot.1, rgba };
+                    // Hyprland 0.56 sometimes hands back an all-transparent or a solid black
+                    // square instead of the cursor (hardware cursor planes); never show those.
+                    let ev = if is_degenerate(&rgba) {
+                        arrow_sprite()
+                    } else {
+                        CursorEvent::Shape { width: *bw, height: *bh, hot_x: s.hotspot.0, hot_y: s.hotspot.1, rgba }
+                    };
                     if last_shape.as_ref() != Some(&ev) {
                         last_shape = Some(ev.clone());
                         emit(ev);
@@ -319,6 +325,12 @@ delegate_noop!(State: ignore osrc_mgr::ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(State: ignore src_v1::ExtImageCaptureSourceV1);
 delegate_noop!(State: ignore cmgr::ExtImageCopyCaptureManagerV1);
 
+/// A captured cursor that is fully transparent or one flat color (no visible shape).
+fn is_degenerate(rgba: &[u8]) -> bool {
+    let px = rgba.as_chunks::<4>().0;
+    px.iter().all(|p| p[3] == 0) || px.windows(2).all(|w| w[0] == w[1])
+}
+
 /// Built-in 16x24 arrow (fallback when the compositor can't give us the real cursor).
 pub fn arrow_sprite() -> CursorEvent {
     const ART: [&str; 24] = [
@@ -369,6 +381,14 @@ mod tests {
         let px = [64u8, 32, 16, 128]; // BGRA premultiplied
         let out = to_rgba(&px, 1, 1, wl_shm::Format::Argb8888);
         assert_eq!(out, vec![32, 64, 128, 128]);
+    }
+
+    #[test]
+    fn degenerate_cursors() {
+        assert!(is_degenerate(&[0u8; 24 * 24 * 4]));
+        assert!(is_degenerate(&[0, 0, 0, 255].repeat(576)));
+        let CursorEvent::Shape { rgba, .. } = arrow_sprite() else { panic!() };
+        assert!(!is_degenerate(&rgba));
     }
 
     #[test]

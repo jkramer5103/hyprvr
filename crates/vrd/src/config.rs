@@ -48,7 +48,9 @@ pub struct Config {
     pub grace_secs: u64,
     /// Directory with equirectangular .jpg/.png environments.
     pub environments_dir: Option<PathBuf>,
-    /// Use the cursor shape from ext-image-copy-capture if available.
+    /// Use the cursor shape from ext-image-copy-capture cursor sessions. Off by default:
+    /// Hyprland 0.56 returns empty/black cursor images and can segfault in
+    /// `CCursorshareSession::copy` while a session is open. Off = built-in arrow.
     pub cursor_capture: bool,
 }
 
@@ -70,7 +72,7 @@ impl Default for Config {
             tile_zstd_level: 1,
             grace_secs: 15,
             environments_dir: None,
-            cursor_capture: true,
+            cursor_capture: false,
         }
     }
 }

@@ -91,11 +91,15 @@ pub struct Settings {
     pub dim: f32,
     pub keyboard_cutout: Option<KeyboardCutout>,
     pub show_stats: bool,
+    /// The laser moves the desktop pointer while just pointing. Off: only pinch/trigger moves
+    /// and clicks, so sweeping a hand across windows doesn't hover/highlight them.
+    #[serde(default)]
+    pub laser_hover: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { environment: Environment::Passthrough, dim: 0.3, keyboard_cutout: None, show_stats: false }
+        Settings { environment: Environment::Passthrough, dim: 0.3, keyboard_cutout: None, show_stats: false, laser_hover: false }
     }
 }
 

@@ -21,6 +21,7 @@ pub enum Action {
     KeyboardToggle,
     Recenter,
     ToggleStats,
+    ToggleHover,
     Digit(u8),
     Backspace,
     ForgetServer,
@@ -87,6 +88,7 @@ pub struct ToolbarState {
     pub dim: f32,
     pub env_name: String,
     pub stats_on: bool,
+    pub hover_on: bool,
     pub cutout_on: bool,
     pub cutout_exists: bool,
     pub can_add: bool,
@@ -146,6 +148,7 @@ pub fn toolbar(s: &ToolbarState) -> UiPanel {
     if s.cutout_exists {
         row2.push((if s.cutout_on { "Keyboard: on" } else { "Keyboard: off" }.into(), s.cutout_on, Action::KeyboardToggle));
     }
+    row2.push((if s.hover_on { "Hover: on" } else { "Hover: off" }.into(), s.hover_on, Action::ToggleHover));
     row2.push(("Stats".into(), s.stats_on, Action::ToggleStats));
     let x0 = PAD * 2.0 + slider_w;
     let bw = (w as f32 - x0 - PAD * row2.len() as f32) / row2.len() as f32;

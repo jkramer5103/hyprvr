@@ -1019,8 +1019,11 @@ impl App {
         let touching = matches!(self.hands[self.primary].select_press, Some(Press::Touch { .. }));
         let pointer_busy =
             self.grab.is_some() || self.menu_drag.is_some() || self.corner.is_some() || self.kb_setup.is_some() || touching;
+        // Without hover the pointer only follows the laser while a button is held.
+        let pressing = matches!(self.hands[self.primary].select_press, Some(Press::Panel { .. }))
+            || matches!(self.hands[self.primary].alt_press, Some(Press::Panel { .. }));
         let hit = match (&self.hands[self.primary].target, pointer_busy) {
-            (Some((Target::Panel { screen, x, y }, _)), false) => Some((*screen, *x, *y)),
+            (Some((Target::Panel { screen, x, y }, _)), false) if self.settings.laser_hover || pressing => Some((*screen, *x, *y)),
             _ => None,
         };
         if let Some((s, x, y)) = self.arbiter.on_laser(hit, now) {
@@ -1218,6 +1221,10 @@ impl App {
                 self.layout = layout::reset(&self.layout, head);
                 self.summon_ui();
                 self.send(ClientMsg::SetLayout(self.layout.clone()));
+            }
+            Action::ToggleHover => {
+                self.settings.laser_hover = !self.settings.laser_hover;
+                self.push_settings();
             }
             Action::ToggleStats => {
                 self.settings.show_stats = !self.settings.show_stats;
@@ -1498,6 +1505,7 @@ impl App {
                     dim: self.settings.dim,
                     env_name,
                     stats_on: self.settings.show_stats,
+                    hover_on: self.settings.laser_hover,
                     cutout_on: self.settings.keyboard_cutout.is_some_and(|c| c.enabled),
                     cutout_exists: self.settings.keyboard_cutout.is_some(),
                     can_add: n < MAX_SCREENS,
