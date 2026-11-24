@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -14,7 +14,9 @@ use hyprvr_proto::msg::{
 };
 use hyprvr_quest_core::geom::{PanelGeom, Ray, hit_rect};
 use hyprvr_quest_core::layout::{self, Grab, Head};
+use hyprvr_quest_core::layout::{CornerResize, TwoHandScale, resize_handles, ray_point_distance, HANDLE_RADIUS};
 use hyprvr_quest_core::menu::{self as menu_logic, MenuDrag};
+use hyprvr_quest_core::touch::{self, PinchTouch};
 use hyprvr_quest_core::misc::{self, PointerArbiter};
 use hyprvr_quest_core::ui::{self, Action, Painter, ToolbarState, UiPanel};
 use log::{info, warn};
@@ -35,6 +37,12 @@ const STATS_UI: (u32, u32) = (1100, 420);
 const CHROME_GAP: f32 = 0.015;
 const SELECT_ON: f32 = 0.7;
 const SELECT_OFF: f32 = 0.4;
+// Hand tracking reports pinch strength well before the fingers touch and keeps it high after
+// they part; only a (nearly) closed pinch counts, and opening it a bit releases.
+const HAND_PINCH_ON: f32 = 0.99;
+const HAND_PINCH_OFF: f32 = 0.8;
+const HAND_GRASP_ON: f32 = 0.9;
+const HAND_GRASP_OFF: f32 = 0.6;
 const DEADZONE: f32 = 0.2;
 const SCROLL_NOTCHES_PER_S: f32 = 12.0;
 const PUSH_M_PER_S: f32 = 1.5;
@@ -165,6 +173,8 @@ enum Surface {
 enum Target {
     Panel { screen: ScreenId, x: f32, y: f32 },
     Ui { surface: Surface, x: f32, y: f32 },
+    /// Corner resize handle of a panel.
+    Resize { screen: ScreenId },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +184,8 @@ enum Press {
     Ui,
     Grab,
     Setup,
+    /// Hand pinch on a panel: click / scroll / drag decided by `PinchTouch`.
+    Touch { screen: ScreenId, touch: PinchTouch },
     Nothing,
 }
 
@@ -247,6 +259,10 @@ pub struct App {
     hands: [HandState; 2],
     primary: usize,
     grab: Option<GrabState>,
+    /// Second hand scaling the grabbed panel.
+    two_hand: Option<TwoHandScale>,
+    /// Corner handle drag: (hand, by_select, resize).
+    corner: Option<(usize, bool, CornerResize)>,
 
     main_ui: UiSurface,
     stats_ui: UiSurface,
@@ -332,6 +348,8 @@ impl App {
             hands: Default::default(),
             primary: 1,
             grab: None,
+            two_hand: None,
+            corner: None,
             main_ui,
             stats_ui,
             toolbar_visible: true,
@@ -748,6 +766,14 @@ impl App {
             if let Some(hit) = g.hit(ray) {
                 consider(Target::Panel { screen: p.screen, x: hit.u * s.w as f32, y: hit.v * s.h as f32 }, hit.t);
             }
+            for h in resize_handles(&g) {
+                if let Some((d, t)) = ray_point_distance(ray.origin, ray.dir, h)
+                    && d < HANDLE_RADIUS
+                {
+                    // Slight preference so the handle wins over a panel right behind it.
+                    consider(Target::Resize { screen: p.screen }, (t - 0.02).max(0.0));
+                }
+            }
             if s.chrome.shown.is_some() {
                 let (cp, cr) = self.chrome_pose(&g, &s.chrome);
                 let (w, h) = s.chrome.size_m();
@@ -776,8 +802,13 @@ impl App {
             let inp = f.hands[i];
             let h = &mut self.hands[i];
             h.inp = inp;
-            let sel = if h.select { inp.select > SELECT_OFF } else { inp.select > SELECT_ON };
-            let sq = if h.squeeze { inp.squeeze > SELECT_OFF } else { inp.squeeze > SELECT_ON };
+            let (sel_on, sel_off, sq_on, sq_off) = if inp.is_hand {
+                (HAND_PINCH_ON, HAND_PINCH_OFF, HAND_GRASP_ON, HAND_GRASP_OFF)
+            } else {
+                (SELECT_ON, SELECT_OFF, SELECT_ON, SELECT_OFF)
+            };
+            let sel = if h.select { inp.select > sel_off } else { inp.select >= sel_on };
+            let sq = if h.squeeze { inp.squeeze > sq_off } else { inp.squeeze >= sq_on };
             let sel_edge = (sel != h.select).then_some(sel);
             let sq_edge = (sq != h.squeeze).then_some(sq);
             let alt_edge = (inp.alt != h.alt).then_some(inp.alt);
@@ -813,6 +844,34 @@ impl App {
                 self.primary = i;
             }
 
+            // Second hand pinching/grabbing while a panel is held: scale with both hands.
+            if self.grab.as_ref().is_some_and(|g| g.hand != i)
+                && self.two_hand.is_none()
+                && (sel_edge == Some(true) || sq_edge == Some(true))
+                && let Some(g) = &self.grab
+            {
+                let by_select = sel_edge == Some(true);
+                let a = self.hands[g.hand].inp.aim_pos;
+                self.two_hand = Some(TwoHandScale::start(i, by_select, a, inp.aim_pos, g.grab.width_m));
+                if by_select {
+                    self.hands[i].select_press = Some(Press::Grab);
+                }
+                info!("two-hand scale started");
+                continue;
+            }
+            if sq_edge == Some(false) && self.two_hand.is_some_and(|t| t.other_hand == i && !t.by_select) {
+                self.two_hand = None;
+            }
+            // Squeeze on a corner handle resizes.
+            if sq_edge == Some(true)
+                && self.corner.is_none()
+                && let Some((Target::Resize { screen }, _)) = &target
+            {
+                self.start_corner(i, *screen, false);
+            }
+            if sq_edge == Some(false) && self.corner.is_some_and(|c| c.0 == i && !c.1) {
+                self.end_corner();
+            }
             // Squeeze on the menu drags it.
             if sq_edge == Some(true)
                 && self.grab.is_none()
@@ -825,7 +884,7 @@ impl App {
                 self.menu_drag = None;
             }
             // Grab with squeeze on a panel or its chrome.
-            if sq_edge == Some(true) && self.grab.is_none() && self.menu_drag.is_none() {
+            if sq_edge == Some(true) && self.grab.is_none() && self.menu_drag.is_none() && self.corner.is_none() {
                 let screen = match &target {
                     Some((Target::Panel { screen, .. }, _)) => Some(*screen),
                     Some((Target::Ui { surface: Surface::Chrome(id), .. }, _)) => Some(*id),
@@ -870,6 +929,28 @@ impl App {
                 self.set_dim(v);
             }
 
+            // Hand pinch on a panel: click / scroll / drag.
+            if let Some(Press::Touch { screen, mut touch }) = self.hands[i].select_press {
+                let pos = match &self.hands[i].target {
+                    Some((Target::Panel { screen: s2, x, y }, _)) if *s2 == screen => Some((*x, *y)),
+                    _ => None,
+                };
+                match touch.update(pos, dt) {
+                    touch::Out::Press { x, y } => {
+                        let _ = self.net.cmd.send(NetCmd::PointerMove { screen, x, y });
+                        self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Left, pressed: true });
+                        let (x, y) = pos.unwrap_or((x, y));
+                        // Now a plain held button that follows the ray.
+                        self.hands[i].select_press = Some(Press::Panel { screen, button: PointerButton::Left, x, y });
+                    }
+                    touch::Out::Scroll { dx, dy } => {
+                        self.hands[i].scroll += Vec2::new(dx, dy);
+                        self.hands[i].select_press = Some(Press::Touch { screen, touch });
+                    }
+                    touch::Out::None => self.hands[i].select_press = Some(Press::Touch { screen, touch }),
+                }
+            }
+
             // Track the pressed panel position while held.
             if let Some(Press::Panel { screen, button, .. }) = self.hands[i].select_press
                 && let Some((Target::Panel { screen: s2, x, y }, _)) = &self.hands[i].target
@@ -886,7 +967,7 @@ impl App {
                 let screen = *screen;
                 let st = inp.stick;
                 let h = &mut self.hands[i];
-                if st.length() > DEADZONE {
+                if !inp.is_hand && st.length() > DEADZONE {
                     h.scroll += Vec2::new(st.x, -st.y) * SCROLL_NOTCHES_PER_S * dt;
                 }
                 let due = h.last_scroll.is_none_or(|t| t.elapsed().as_secs_f32() > 0.033);
@@ -896,7 +977,7 @@ impl App {
                     h.last_scroll = Some(Instant::now());
                     let _ = self.net.cmd.send(NetCmd::Send(ClientMsg::Scroll { screen, dx: d.x, dy: d.y }));
                 }
-            } else {
+            } else if !matches!(self.hands[i].select_press, Some(Press::Touch { .. })) {
                 self.hands[i].scroll = Vec2::ZERO;
             }
         }
@@ -907,8 +988,23 @@ impl App {
             let st = h.inp.stick;
             let push = if st.y.abs() > DEADZONE { st.y * PUSH_M_PER_S * dt } else { 0.0 };
             let grow = if st.x.abs() > DEADZONE { st.x * GROW_PER_S * dt } else { 0.0 };
+            if let Some(t) = &self.two_hand {
+                g.grab.width_m = t.width(h.inp.aim_pos, self.hands[t.other_hand].inp.aim_pos);
+            }
             if let Some(p) = self.layout.iter_mut().find(|p| p.screen == g.grab.screen) {
                 g.grab.update(p, h.inp.aim_pos, h.inp.aim_rot, self.head.0, push, grow);
+            }
+        }
+
+        if self.grab.is_none() {
+            self.two_hand = None;
+        }
+        if let Some((hand, _, r)) = &self.corner {
+            let inp = &self.hands[*hand].inp;
+            if let Some(w) = r.width(inp.aim_pos, inp.aim_rot * Vec3::NEG_Z)
+                && let Some(p) = self.layout.iter_mut().find(|p| p.screen == r.screen)
+            {
+                p.width_m = w;
             }
         }
 
@@ -920,7 +1016,9 @@ impl App {
         }
 
         // Laser drives the desktop pointer (primary hand only).
-        let pointer_busy = self.grab.is_some() || self.menu_drag.is_some() || self.kb_setup.is_some();
+        let touching = matches!(self.hands[self.primary].select_press, Some(Press::Touch { .. }));
+        let pointer_busy =
+            self.grab.is_some() || self.menu_drag.is_some() || self.corner.is_some() || self.kb_setup.is_some() || touching;
         let hit = match (&self.hands[self.primary].target, pointer_busy) {
             (Some((Target::Panel { screen, x, y }, _)), false) => Some((*screen, *x, *y)),
             _ => None,
@@ -949,6 +1047,17 @@ impl App {
             return Press::Setup;
         }
         match target {
+            Some(Target::Resize { screen }) => {
+                self.start_corner(hand, *screen, true);
+                Press::Grab
+            }
+            Some(Target::Panel { screen, x, y }) if self.hands[hand].inp.is_hand => {
+                // Decided on movement/hold; the pointer stays where the pinch started.
+                self.arbiter.on_press();
+                let _ = self.net.cmd.send(NetCmd::PointerMove { screen: *screen, x: *x, y: *y });
+                let h = self.screens.get(screen).map_or(1080, |s| s.h);
+                Press::Touch { screen: *screen, touch: PinchTouch::new(*x, *y, h) }
+            }
             Some(Target::Panel { screen, x, y }) => {
                 self.arbiter.on_press();
                 let _ = self.net.cmd.send(NetCmd::PointerMove { screen: *screen, x: *x, y: *y });
@@ -996,8 +1105,37 @@ impl App {
                 if self.menu_drag.is_some_and(|d| d.hand == hand && d.by_select) {
                     self.menu_drag = None;
                 }
+                if self.two_hand.is_some_and(|t| t.other_hand == hand && t.by_select) {
+                    self.two_hand = None;
+                }
+                if self.corner.is_some_and(|c| c.0 == hand && c.1) {
+                    self.end_corner();
+                }
+            }
+            Press::Touch { screen, touch } => {
+                if touch.is_click() {
+                    let (x, y) = touch.start;
+                    self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Left, pressed: true });
+                    self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Left, pressed: false });
+                }
             }
             Press::Ui | Press::Setup | Press::Nothing => {}
+        }
+    }
+
+    fn start_corner(&mut self, hand: usize, screen: ScreenId, by_select: bool) {
+        let (Some(p), Some(s)) = (self.layout.iter().find(|p| p.screen == screen), self.screens.get(&screen)) else { return };
+        let aspect = s.w.max(1) as f32 / s.h.max(1) as f32;
+        let inp = &self.hands[hand].inp;
+        if let Some(r) = CornerResize::start(p, aspect, inp.aim_pos, inp.aim_rot * Vec3::NEG_Z) {
+            info!("resize screen {screen}");
+            self.corner = Some((hand, by_select, r));
+        }
+    }
+
+    fn end_corner(&mut self) {
+        if self.corner.take().is_some() {
+            self.send(ClientMsg::SetLayout(self.layout.clone()));
         }
     }
 
@@ -1015,6 +1153,7 @@ impl App {
     }
 
     fn end_grab(&mut self) {
+        self.two_hand = None;
         if let Some(g) = self.grab.take() {
             info!("released screen {}", g.grab.screen);
             self.send(ClientMsg::SetLayout(self.layout.clone()));
@@ -1205,6 +1344,7 @@ impl App {
         self.hands.iter().any(|h| match &h.target {
             Some((Target::Panel { screen, .. }, _)) => *screen == id,
             Some((Target::Ui { surface: Surface::Chrome(s), .. }, _)) => *s == id,
+            Some((Target::Resize { screen }, _)) => *screen == id,
             _ => false,
         })
     }
@@ -1486,6 +1626,26 @@ impl App {
                 push_disc(&mut verts, end - dir * 0.004, eye, r * 0.9, c);
             }
         }
+        // Corner resize handles (L brackets) for panels the user is pointing at / resizing.
+        for p in &self.layout {
+            let Some(g) = self.panel_geom(p) else { continue };
+            let resizing = self.corner.is_some_and(|c| c.2.screen == p.screen);
+            let hovered = self.hands.iter().any(|h| matches!(&h.target, Some((Target::Resize { screen }, _)) if *screen == p.screen));
+            if !(resizing || hovered || self.chrome_visible(p.screen)) {
+                continue;
+            }
+            let c = if resizing || hovered { [0.35, 0.6, 1.0, 1.0] } else { [0.85, 0.85, 0.85, 0.75] };
+            let right = g.rot * Vec3::X;
+            let up = g.rot * Vec3::Y;
+            let arm = 0.045;
+            let w = if resizing || hovered { 0.007 } else { 0.005 };
+            for (k, h) in resize_handles(&g).into_iter().enumerate() {
+                let side = if k == 0 { -1.0 } else { 1.0 };
+                // Bracket corner points outward-down; arms run back along the panel edges.
+                push_beam(&mut verts, h, h - right * side * arm, eye, w, c, c);
+                push_beam(&mut verts, h, h + up * arm, eye, w, c, c);
+            }
+        }
         if verts.is_empty() {
             return Ok(false);
         }
@@ -1516,6 +1676,15 @@ impl Drop for App {
             self.close_screen(id);
         }
         self.player.pause();
+        // Clean goodbye so the PC removes its virtual screens right away.
+        let _ = self.net.cmd.send(NetCmd::Quit);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(600)
+            && !(self.net.shared.quitting.load(Ordering::Relaxed) && !self.net.shared.connected.load(Ordering::Relaxed))
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        info!("goodbye sent: {}", self.net.shared.quitting.load(Ordering::Relaxed));
     }
 }
 

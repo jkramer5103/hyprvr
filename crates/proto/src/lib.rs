@@ -22,6 +22,10 @@ pub const DISCOVERY_PORT: u16 = 47801;
 /// TLS ALPN identifier.
 pub const ALPN: &[u8] = b"hyprvr/1";
 /// Side length of a lossless tile in pixels.
+/// QUIC application close code a headset uses when it leaves on purpose (app closed,
+/// unpaired). The server then removes virtual outputs immediately instead of keeping
+/// them for the reconnect grace period.
+pub const CLOSE_GOODBYE: u32 = 0x4859;
 pub const TILE_SIZE: u32 = 64;
 /// Audio format carried in [`msg::Datagram::Audio`]: interleaved s16le stereo.
 pub const AUDIO_RATE: u32 = 48_000;

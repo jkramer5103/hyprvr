@@ -148,7 +148,7 @@ impl Grab {
             let new_len = (len + push).clamp(0.25, 6.0);
             self.local_offset *= new_len / len;
         }
-        self.width_m = (self.width_m * (1.0 + grow)).clamp(0.2, 6.0);
+        self.width_m = (self.width_m * (1.0 + grow)).clamp(MIN_WIDTH_M, MAX_WIDTH_M);
         let pos = ctrl_pos + ctrl_rot * self.local_offset;
         panel.pose = from_glam(pos, face_toward(pos, head_pos));
         panel.width_m = self.width_m;
@@ -174,6 +174,91 @@ pub fn toggle_curve(panel: &mut PanelLayout, head_pos: Vec3) {
 pub fn below_panel(panel_center: Vec3, panel_rot: Quat, panel_height: f32, strip_height: f32, gap: f32) -> (Vec3, Quat) {
     let down = panel_rot * Vec3::NEG_Y;
     (panel_center + down * (panel_height / 2.0 + gap + strip_height / 2.0), panel_rot)
+}
+
+pub const MIN_WIDTH_M: f32 = 0.2;
+pub const MAX_WIDTH_M: f32 = 6.0;
+/// How far the resize handles sit outside the panel corners (m).
+pub const HANDLE_OUTSET: f32 = 0.035;
+/// Pick radius of a resize handle (m).
+pub const HANDLE_RADIUS: f32 = 0.035;
+
+/// World positions of the two bottom-corner resize handles of a panel (left, right).
+pub fn resize_handles(g: &crate::geom::PanelGeom) -> [Vec3; 2] {
+    let du = HANDLE_OUTSET / g.width.max(0.05);
+    let dv = HANDLE_OUTSET / g.height.max(0.05);
+    [g.point_at(-du, 1.0 + dv, 0.005), g.point_at(1.0 + du, 1.0 + dv, 0.005)]
+}
+
+/// Distance from a ray to a point, and the ray parameter of the closest approach
+/// (None if the point is behind the ray origin).
+pub fn ray_point_distance(origin: Vec3, dir: Vec3, p: Vec3) -> Option<(f32, f32)> {
+    let t = (p - origin).dot(dir);
+    if t <= 0.0 {
+        return None;
+    }
+    Some(((origin + dir * t - p).length(), t))
+}
+
+/// Half-extent measure of where a ray meets the panel's plane, in "width" units
+/// (the width a panel would need for that point to be on its border, keeping the aspect).
+fn extent(center: Vec3, rot: Quat, aspect: f32, origin: Vec3, dir: Vec3) -> Option<f32> {
+    let inv = rot.inverse();
+    let o = inv * (origin - center);
+    let d = inv * dir;
+    if d.z.abs() < 1e-4 {
+        return None;
+    }
+    let t = -o.z / d.z;
+    if t <= 0.0 {
+        return None;
+    }
+    let p = o + d * t;
+    Some((2.0 * p.x.abs()).max(2.0 * p.y.abs() * aspect))
+}
+
+/// Dragging a corner handle: the panel grows/shrinks around its center, keeping its aspect.
+#[derive(Clone, Copy, Debug)]
+pub struct CornerResize {
+    pub screen: ScreenId,
+    center: Vec3,
+    rot: Quat,
+    aspect: f32,
+    w0: f32,
+    e0: f32,
+}
+
+impl CornerResize {
+    pub fn start(panel: &PanelLayout, aspect: f32, origin: Vec3, dir: Vec3) -> Option<Self> {
+        let (center, rot) = to_glam(&panel.pose);
+        let e0 = extent(center, rot, aspect, origin, dir)?;
+        (e0 > 0.02).then_some(CornerResize { screen: panel.screen, center, rot, aspect, w0: panel.width_m, e0 })
+    }
+
+    /// New width for the current ray (None while the ray misses the panel plane).
+    pub fn width(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
+        let e = extent(self.center, self.rot, self.aspect, origin, dir)?;
+        Some((self.w0 * e / self.e0).clamp(MIN_WIDTH_M, MAX_WIDTH_M))
+    }
+}
+
+/// Two-handed scaling: width follows the distance between the hands.
+#[derive(Clone, Copy, Debug)]
+pub struct TwoHandScale {
+    pub other_hand: usize,
+    pub by_select: bool,
+    d0: f32,
+    w0: f32,
+}
+
+impl TwoHandScale {
+    pub fn start(other_hand: usize, by_select: bool, a: Vec3, b: Vec3, width_m: f32) -> Self {
+        TwoHandScale { other_hand, by_select, d0: (a - b).length().max(0.05), w0: width_m }
+    }
+
+    pub fn width(&self, a: Vec3, b: Vec3) -> f32 {
+        (self.w0 * (a - b).length() / self.d0).clamp(MIN_WIDTH_M, MAX_WIDTH_M)
+    }
 }
 
 #[cfg(test)]
@@ -258,5 +343,54 @@ mod tests {
         assert!(matches!(p.curvature, Curvature::Curved { .. }));
         toggle_curve(&mut p, head().position);
         assert_eq!(p.curvature, Curvature::Flat);
+    }
+
+    #[test]
+    fn corner_resize_scales_with_ray() {
+        let p = PanelLayout {
+            screen: 1,
+            pose: from_glam(Vec3::new(0.0, 1.0, -1.0), Quat::IDENTITY),
+            width_m: 1.0,
+            curvature: Curvature::Flat,
+        };
+        let aspect = 16.0 / 9.0;
+        let eye = Vec3::new(0.0, 1.0, 0.0);
+        // Start at the bottom-right corner (0.5, -0.28).
+        let c0 = Vec3::new(0.5, 1.0 - 0.5 / aspect, -1.0);
+        let r = CornerResize::start(&p, aspect, eye, (c0 - eye).normalize()).unwrap();
+        assert!((r.width(eye, (c0 - eye).normalize()).unwrap() - 1.0).abs() < 1e-3);
+        // Pull the corner out to x = 0.75: 1.5x wider.
+        let c1 = Vec3::new(0.75, 1.0 - 0.5 / aspect, -1.0);
+        assert!((r.width(eye, (c1 - eye).normalize()).unwrap() - 1.5).abs() < 1e-3);
+        // Pulling straight down also grows it (aspect kept).
+        let c2 = Vec3::new(0.5, 1.0 - 0.75 / aspect, -1.0);
+        assert!((r.width(eye, (c2 - eye).normalize()).unwrap() - 1.5).abs() < 1e-3);
+        // Shrinks, but never below the minimum.
+        let c3 = Vec3::new(0.01, 0.999, -1.0);
+        assert_eq!(r.width(eye, (c3 - eye).normalize()).unwrap(), MIN_WIDTH_M);
+    }
+
+    #[test]
+    fn two_hand_scale() {
+        let s = TwoHandScale::start(1, true, Vec3::ZERO, Vec3::new(0.3, 0.0, 0.0), 1.2);
+        assert!((s.width(Vec3::ZERO, Vec3::new(0.6, 0.0, 0.0)) - 2.4).abs() < 1e-4);
+        assert!((s.width(Vec3::ZERO, Vec3::new(0.15, 0.0, 0.0)) - 0.6).abs() < 1e-4);
+        assert_eq!(s.width(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)), MAX_WIDTH_M);
+    }
+
+    #[test]
+    fn handles_outside_bottom_corners() {
+        let p = PanelLayout {
+            screen: 1,
+            pose: from_glam(Vec3::new(0.0, 1.0, -1.0), Quat::IDENTITY),
+            width_m: 1.0,
+            curvature: Curvature::Flat,
+        };
+        let g = crate::geom::PanelGeom::new(&p, 1920, 1080);
+        let [l, r] = resize_handles(&g);
+        assert!(l.x < -0.5 && r.x > 0.5);
+        assert!(l.y < 1.0 - g.height / 2.0 && r.y < 1.0 - g.height / 2.0);
+        let (d, _) = ray_point_distance(Vec3::new(0.0, 1.0, 0.0), (r - Vec3::new(0.0, 1.0, 0.0)).normalize(), r).unwrap();
+        assert!(d < 1e-4);
     }
 }

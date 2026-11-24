@@ -201,7 +201,16 @@ async fn handle(d: Arc<Daemon>, conn: quinn::Connection) -> Result<()> {
     dgram.abort();
     {
         let d = d.clone();
-        blocking(move || d.detach(sid)).await;
+        // A goodbye close code means the headset left on purpose.
+        let reason = match conn.close_reason() {
+            Some(r) => Some(r),
+            None => timeout(Duration::from_millis(300), conn.closed()).await.ok(),
+        };
+        let clean = matches!(
+            reason,
+            Some(quinn::ConnectionError::ApplicationClosed(ref c)) if c.error_code == quinn::VarInt::from_u32(hyprvr_proto::CLOSE_GOODBYE)
+        );
+        blocking(move || d.detach(sid, clean)).await;
     }
     drop(out_tx);
     let _ = timeout(Duration::from_secs(1), writer).await;

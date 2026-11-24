@@ -245,11 +245,27 @@ impl Daemon {
         if !inner.screens.is_empty() {
             return;
         }
-        let specs = inner.store.screens.clone().unwrap_or_else(|| {
-            (0..self.cfg.default_screens)
-                .map(|_| ScreenSpec::Virtual { width: self.cfg.default_width, height: self.cfg.default_height })
-                .collect()
+        // Virtual screens live only as long as a session (plus the reconnect grace), so a new
+        // session starts from the saved mirrors; with none, the PC's main monitor is shown.
+        let saved = inner.store.screens.clone().unwrap_or_default();
+        let keep: Vec<bool> = saved.iter().map(|s| !matches!(s, ScreenSpec::Virtual { .. })).collect();
+        let mut specs: Vec<ScreenSpec> = saved.into_iter().filter(|s| !matches!(s, ScreenSpec::Virtual { .. })).collect();
+        let mut i = 0;
+        inner.store.layout.retain(|_| {
+            let k = keep.get(i).copied().unwrap_or(false);
+            i += 1;
+            k
         });
+        if specs.is_empty() {
+            self.refresh_physical(inner);
+            match main_monitor(&inner.physical) {
+                Some(m) => specs.push(ScreenSpec::Mirror { output: m.to_string() }),
+                None => specs.extend((0..self.cfg.default_screens).map(|_| ScreenSpec::Virtual {
+                    width: self.cfg.default_width,
+                    height: self.cfg.default_height,
+                })),
+            }
+        }
         for spec in specs.into_iter().take(config::MAX_SCREENS) {
             let spec = match spec {
                 ScreenSpec::Virtual { width, height } => {
@@ -260,7 +276,10 @@ impl Daemon {
             };
             let (width, height) = match &spec {
                 ScreenSpec::Virtual { width, height } => (*width, *height),
-                ScreenSpec::Mirror { .. } => (0, 0),
+                // Real size arrives with the output; this only sizes the default 3D slot.
+                ScreenSpec::Mirror { output } => {
+                    inner.physical.iter().find(|m| &m.name == output).map_or((1920, 1080), |m| (m.width, m.height))
+                }
             };
             let id = inner.next_id;
             inner.next_id += 1;
@@ -379,10 +398,21 @@ impl Daemon {
             let _ = self.comp.set_positions(&inner.store.original_positions);
         }
         inner.store.original_positions.clear();
+        // Virtual screens are gone for good; mirrors stay for the next session.
+        let keep: Vec<bool> = inner.screens.iter().map(|s| !s.is_virtual()).collect();
+        let mut i = 0;
+        inner.store.layout.retain(|_| {
+            let k = keep.get(i).copied().unwrap_or(false);
+            i += 1;
+            k
+        });
+        inner.screens.retain(|s| !s.is_virtual());
+        self.fill_layout(inner);
         inner.store.save();
         inner.outputs_live = false;
         inner.grace_deadline = None;
         self.update_routes(inner);
+        self.build_screens(inner);
     }
 
     /// Arrange compositor monitor positions after the 3D layout.
@@ -621,13 +651,15 @@ impl Daemon {
         id
     }
 
-    pub fn detach(&self, sid: u64) {
+    /// `clean`: the headset said goodbye (app closed / disconnect); virtual outputs are removed
+    /// right away. Otherwise they are kept for `grace_secs` in case it comes back.
+    pub fn detach(&self, sid: u64, clean: bool) {
         let mut inner = self.inner.lock().unwrap();
         if inner.session.as_ref().map(|s| s.id) != Some(sid) {
             return;
         }
         let s = inner.session.take().unwrap();
-        tracing::info!("headset {} disconnected", s.name);
+        tracing::info!("headset {} disconnected ({})", s.name, if clean { "clean" } else { "lost" });
         *self.active.write().unwrap() = None;
         for s in &mut inner.screens {
             s.pipeline = None;
@@ -638,7 +670,7 @@ impl Daemon {
             let _ = self.audio.to_laptop();
         }
         self.cursor.lock().unwrap().pos = None;
-        if self.cfg.grace_secs == 0 {
+        if clean || self.cfg.grace_secs == 0 {
             self.teardown(&mut inner);
         } else {
             inner.grace_deadline = Some(Instant::now() + Duration::from_secs(self.cfg.grace_secs));
@@ -1116,4 +1148,14 @@ impl Daemon {
     pub fn now_us(&self) -> u64 {
         now_us(self.epoch)
     }
+}
+
+/// The PC's "main" monitor: the built-in panel if there is one, else the one at the origin.
+fn main_monitor(physical: &[Monitor]) -> Option<&str> {
+    physical
+        .iter()
+        .find(|m| m.name.starts_with("eDP") || m.name.starts_with("LVDS") || m.name.starts_with("DSI"))
+        .or_else(|| physical.iter().find(|m| (m.x, m.y) == (0, 0)))
+        .or_else(|| physical.first())
+        .map(|m| m.name.as_str())
 }

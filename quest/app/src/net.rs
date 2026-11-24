@@ -30,6 +30,8 @@ pub enum NetCmd {
     PointerMove { screen: ScreenId, x: f32, y: f32 },
     Pin(String),
     ForgetServer,
+    /// The app is closing: say goodbye (server drops virtual screens at once) and stop.
+    Quit,
 }
 
 #[derive(Debug)]
@@ -79,6 +81,8 @@ pub struct Shared {
     pub clock: Mutex<ClockSync>,
     pub rx_bytes: AtomicU64,
     pub connected: AtomicBool,
+    /// Set once `NetCmd::Quit` was handled; the client stops reconnecting.
+    pub quitting: AtomicBool,
 }
 
 pub struct NetConfig {
@@ -206,11 +210,19 @@ async fn run(
         }
         ctx.shared.connected.store(false, Ordering::Relaxed);
         ctx.audio.reset();
-        // Drain commands that piled up while disconnected (except Forget).
+        // Drain commands that piled up while disconnected (except Forget / Quit).
         while let Ok(c) = cmd_rx.try_recv() {
-            if let NetCmd::ForgetServer = c {
-                ctx.forget();
+            match c {
+                NetCmd::ForgetServer => ctx.forget(),
+                NetCmd::Quit => ctx.shared.quitting.store(true, Ordering::Relaxed),
+                _ => {}
             }
+        }
+        if ctx.shared.quitting.load(Ordering::Relaxed) {
+            // Let the CONNECTION_CLOSE go out before the process dies.
+            let _ = tokio::time::timeout(Duration::from_millis(400), endpoint.wait_idle()).await;
+            info!("network stopped (quit)");
+            return;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(4));
@@ -457,9 +469,14 @@ async fn session(ctx: &Arc<Ctx>, endpoint: &quinn::Endpoint, cmd_rx: &mut tmpsc:
                     if let Err(e) = conn.send_datagram(d.into()) { warn!("send datagram: {e}"); }
                 }
                 Some(NetCmd::Pin(_)) => {}
+                Some(NetCmd::Quit) => {
+                    ctx.shared.quitting.store(true, Ordering::Relaxed);
+                    conn.close(hyprvr_proto::CLOSE_GOODBYE.into(), b"quit");
+                    break Ok(());
+                }
                 Some(NetCmd::ForgetServer) => {
                     ctx.forget();
-                    conn.close(0u32.into(), b"forget");
+                    conn.close(hyprvr_proto::CLOSE_GOODBYE.into(), b"forget");
                     break Ok(());
                 }
             },
@@ -489,6 +506,11 @@ async fn pair(
                 None => bail!("shutting down"),
                 Some(NetCmd::Pin(p)) => break p,
                 Some(NetCmd::ForgetServer) => ctx.forget(),
+                Some(NetCmd::Quit) => {
+                    ctx.shared.quitting.store(true, Ordering::Relaxed);
+                    conn.close(hyprvr_proto::CLOSE_GOODBYE.into(), b"quit");
+                    bail!("quitting");
+                }
                 Some(_) => {}
             },
         }

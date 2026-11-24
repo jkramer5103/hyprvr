@@ -68,7 +68,7 @@ impl Default for Config {
             video_kbps_max: 50_000,
             tile_kbps_budget: 60_000,
             tile_zstd_level: 1,
-            grace_secs: 300,
+            grace_secs: 15,
             environments_dir: None,
             cursor_capture: true,
         }

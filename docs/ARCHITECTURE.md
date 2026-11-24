@@ -44,5 +44,5 @@ edges and `movefocus` match what you see.
 * Last-used wins: the headset hides its ray cursor when the server reports physical motion.
 
 ## Lifecycle
-Outputs persist for a 5 min grace period after the headset disconnects, then are removed
+Virtual outputs are removed as soon as the headset disconnects cleanly (app closed). If the connection is lost instead, they persist for a 15 s grace period (`grace_secs`) waiting for a reconnect, then are removed
 and Hyprland moves the windows to eDP.
