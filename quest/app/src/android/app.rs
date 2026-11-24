@@ -1215,7 +1215,7 @@ impl App {
             }
             Action::Recenter => {
                 let head = self.head_struct();
-                self.layout = layout::recenter(&self.layout, head);
+                self.layout = layout::reset(&self.layout, head);
                 self.summon_ui();
                 self.send(ClientMsg::SetLayout(self.layout.clone()));
             }

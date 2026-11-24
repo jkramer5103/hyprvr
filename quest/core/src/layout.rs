@@ -82,6 +82,32 @@ pub fn recenter(layout: &[PanelLayout], head: Head) -> Vec<PanelLayout> {
         .collect()
 }
 
+/// Recenter = reset: every panel back to the default size and distance, in an arc in front
+/// of `head`, keeping their left-to-right order and whether they are curved.
+pub fn reset(layout: &[PanelLayout], head: Head) -> Vec<PanelLayout> {
+    let fwd = Quat::from_rotation_y(head.yaw) * Vec3::NEG_Z;
+    let right = Quat::from_rotation_y(head.yaw) * Vec3::X;
+    let mut order: Vec<(f32, &PanelLayout)> = layout
+        .iter()
+        .map(|p| {
+            let d = Vec3::from_array(p.pose.position) - head.position;
+            (d.dot(right).atan2(d.dot(fwd)), p)
+        })
+        .collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let ids: Vec<(ScreenId, f32)> = order.iter().map(|(_, p)| (p.screen, 16.0 / 9.0)).collect();
+    default_arc(&ids, head)
+        .into_iter()
+        .zip(order.iter())
+        .map(|(mut n, (_, old))| {
+            if let Curvature::Curved { .. } = old.curvature {
+                n.curvature = Curvature::Curved { radius_m: DEFAULT_DISTANCE };
+            }
+            n
+        })
+        .collect()
+}
+
 /// Pose for a new panel: to the right of the rightmost existing one (as seen from `head`),
 /// or straight ahead if there are none.
 pub fn place_new(layout: &[PanelLayout], screen: ScreenId, head: Head) -> PanelLayout {
@@ -392,5 +418,27 @@ mod tests {
         assert!(l.y < 1.0 - g.height / 2.0 && r.y < 1.0 - g.height / 2.0);
         let (d, _) = ray_point_distance(Vec3::new(0.0, 1.0, 0.0), (r - Vec3::new(0.0, 1.0, 0.0)).normalize(), r).unwrap();
         assert!(d < 1e-4);
+    }
+
+    #[test]
+    fn reset_restores_size_and_order() {
+        let head = Head { position: Vec3::new(0.0, 1.6, 0.0), yaw: 0.0 };
+        let mut l = default_arc(&[(1, 1.7), (2, 1.7)], head);
+        // Blow panel 1 up, push it far away, and swap sides.
+        l[0].width_m = 5.5;
+        l[0].pose.position = [3.0, 2.5, -4.0];
+        l[1].pose.position = [-1.0, 1.6, -1.0];
+        l[1].curvature = Curvature::Curved { radius_m: 3.0 };
+        let r = reset(&l, head);
+        assert!(r.iter().all(|p| (p.width_m - DEFAULT_WIDTH).abs() < 1e-6));
+        // Screen 2 is now on the left, screen 1 on the right.
+        assert_eq!(r[0].screen, 2);
+        assert_eq!(r[1].screen, 1);
+        assert!(r[0].pose.position[0] < 0.0 && r[1].pose.position[0] > 0.0);
+        assert_eq!(r[0].curvature, Curvature::Curved { radius_m: DEFAULT_DISTANCE });
+        for p in &r {
+            let d = (Vec3::from_array(p.pose.position) - head.position).length();
+            assert!((d - DEFAULT_DISTANCE).abs() < 1e-4);
+        }
     }
 }
