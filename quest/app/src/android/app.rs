@@ -276,6 +276,9 @@ pub struct App {
     /// Left palm currently faces the user (pinch toggles the menu).
     palm_armed: bool,
     last_menu_toggle: Option<Instant>,
+    /// Environment picker open (page).
+    env_picker: Option<usize>,
+    thumbs_requested: Option<Instant>,
     head: (Vec3, Quat),
     kb_setup: Option<Vec<Vec3>>,
     dim_dragging: bool,
@@ -320,7 +323,8 @@ impl App {
             video.clone(),
             jitter.clone(),
         );
-        let (ew, eh) = (align_even(init.eye_size.0 as f32 * 0.6), align_even(init.eye_size.1 as f32 * 0.6));
+        // Full resolution: the environment is a photo and every pixel shows.
+        let (ew, eh) = (align_even(init.eye_size.0 as f32), align_even(init.eye_size.1 as f32));
         let (ow, oh) = (align_even(init.eye_size.0 as f32 * 0.8), align_even(init.eye_size.1 as f32 * 0.8));
         let env = EnvState { sc: Sc::new(&session, format, ew * 2, eh)?, eye_w: ew, eye_h: eh, image: None, requested: HashSet::new() };
         let overlay = Sc::new(&session, format, ow * 2, oh)?;
@@ -360,6 +364,8 @@ impl App {
             menu_drag: None,
             palm_armed: false,
             last_menu_toggle: None,
+            env_picker: None,
+            thumbs_requested: None,
             head: (Vec3::new(0.0, 1.6, 0.0), Quat::IDENTITY),
             kb_setup: None,
             dim_dragging: false,
@@ -552,6 +558,9 @@ impl App {
                     drop_video(&self.gfx, self.egl_images.get(), v);
                 }
             }
+            NetEvent::EnvThumb { name, width, height, rgba } => {
+                self.painter.set_image(&name, width, height, rgba);
+            }
             NetEvent::Environment { name, width, height, rgba } => {
                 info!("environment {name}: {width}x{height}");
                 let tex = self.gfx.texture(width, height, true, true)?;
@@ -560,6 +569,11 @@ impl App {
                 unsafe {
                     self.gfx.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                     self.gfx.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+                    // Sharper toward the floor/ceiling, where equirect texels get squashed.
+                    if self.gfx.gl.supported_extensions().contains("GL_EXT_texture_filter_anisotropic") {
+                        const MAX_ANISOTROPY_EXT: u32 = 0x84FE;
+                        self.gfx.gl.tex_parameter_f32(glow::TEXTURE_2D, MAX_ANISOTROPY_EXT, 8.0);
+                    }
                 }
                 if let Some((_, old)) = self.env.image.replace((name, tex)) {
                     self.gfx.delete_texture(old);
@@ -734,6 +748,7 @@ impl App {
         if self.toolbar_visible {
             self.toolbar_visible = false;
             self.menu_drag = None;
+            self.env_picker = None;
             info!("menu hidden");
         } else {
             self.toolbar_visible = true;
@@ -1229,6 +1244,37 @@ impl App {
                 self.send(ClientMsg::SetAudio(next));
             }
             Action::Dim => {}
+            Action::EnvPicker => {
+                let envs = self.state.as_ref().map(|s| s.environments.clone()).unwrap_or_default();
+                // Open on the page that shows the current environment.
+                let lead = if self.passthrough.is_some() { 2 } else { 1 };
+                let idx = match &self.settings.environment {
+                    Environment::Image(n) => envs.iter().position(|e| e == n).map_or(0, |i| i + lead),
+                    _ => 0,
+                };
+                self.env_picker = Some(idx / ui::PICKER_PER_PAGE);
+                let missing = envs.iter().any(|e| !self.painter.has_image(e));
+                if missing && self.thumbs_requested.is_none_or(|t| t.elapsed().as_secs() > 20) {
+                    self.thumbs_requested = Some(Instant::now());
+                    self.send(ClientMsg::GetEnvironmentThumbs);
+                }
+            }
+            Action::EnvPage(d) => {
+                if let Some(p) = &mut self.env_picker {
+                    *p = (*p as i32 + d).max(0) as usize;
+                }
+            }
+            Action::EnvBack => self.env_picker = None,
+            Action::EnvPick(e) => {
+                self.settings.environment = e;
+                if let Environment::Image(name) = &self.settings.environment
+                    && self.env.image.as_ref().is_none_or(|(n, _)| n != name)
+                {
+                    self.env.requested.insert(name.clone());
+                    self.send(ClientMsg::GetEnvironment { name: name.clone() });
+                }
+                self.push_settings();
+            }
             Action::NextEnv => {
                 let envs = self.state.as_ref().map(|s| s.environments.clone()).unwrap_or_default();
                 let mut cycle = vec![Environment::Passthrough, Environment::Void];
@@ -1531,6 +1577,17 @@ impl App {
                 "Optional: put host = \"<pc ip>\" in files/config.toml".into(),
             ]),
             Conn::Pin { server, entered, message } => ui::pin_pad(entered, server, message),
+            Conn::Connected { .. } if self.env_picker.is_some() => {
+                let envs = self.state.as_ref().map(|s| s.environments.clone()).unwrap_or_default();
+                let painter = &self.painter;
+                ui::env_picker(
+                    &envs,
+                    &self.settings.environment,
+                    self.passthrough.is_some(),
+                    self.env_picker.unwrap_or(0),
+                    &|n| painter.has_image(n),
+                )
+            }
             Conn::Connected { server } => {
                 let st = self.state.as_ref();
                 let env_name = match &self.settings.environment {

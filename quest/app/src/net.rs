@@ -52,6 +52,7 @@ pub enum NetEvent {
     VideoStart { screen: ScreenId, generation: u64, rect: Rect },
     VideoStop { screen: ScreenId },
     Environment { name: String, width: u32, height: u32, rgba: Vec<u8> },
+    EnvThumb { name: String, width: u32, height: u32, rgba: Vec<u8> },
 }
 
 /// Hardware video decoding, implemented by the platform layer.
@@ -560,6 +561,23 @@ async fn uni_stream(ctx: &Ctx, mut s: quinn::RecvStream) -> Result<()> {
             }
             return Ok(());
         }
+        StreamMsg::EnvironmentThumb { name, data } => {
+            let mut next = Some((name, data));
+            while let Some((name, data)) = next.take() {
+                ctx.shared.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                match image::load_from_memory(&data) {
+                    Ok(img) => {
+                        let img = img.to_rgba8();
+                        ctx.emit(NetEvent::EnvThumb { name, width: img.width(), height: img.height(), rgba: img.into_raw() });
+                    }
+                    Err(e) => warn!("thumbnail {name}: {e}"),
+                }
+                if let Ok(StreamMsg::EnvironmentThumb { name, data }) = read_msg(&mut s).await {
+                    next = Some((name, data));
+                }
+            }
+            return Ok(());
+        }
         other => bail!("unexpected first stream message {other:?}"),
     };
     info!("screen {screen} stream open {width}x{height}");
@@ -618,7 +636,7 @@ async fn uni_stream(ctx: &Ctx, mut s: quinn::RecvStream) -> Result<()> {
                     }
                     ctx.emit(NetEvent::Resized { screen, width, height });
                 }
-                StreamMsg::ScreenHeader { .. } | StreamMsg::EnvironmentImage { .. } => {
+                StreamMsg::ScreenHeader { .. } | StreamMsg::EnvironmentImage { .. } | StreamMsg::EnvironmentThumb { .. } => {
                     warn!("screen {screen}: unexpected message in stream")
                 }
             }
@@ -636,9 +654,11 @@ async fn uni_stream(ctx: &Ctx, mut s: quinn::RecvStream) -> Result<()> {
 
 fn decode_env(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     let img = image::load_from_memory(data).context("decode image")?.to_rgba8();
-    let img = if img.width() > 4096 {
-        let h = (img.height() as u64 * 4096 / img.width() as u64) as u32;
-        image::imageops::resize(&img, 4096, h.max(1), image::imageops::FilterType::Triangle)
+    // 8192 px over 360° is ~23 px/degree, about the Quest 3's own resolution.
+    const MAX_W: u32 = 8192;
+    let img = if img.width() > MAX_W {
+        let h = (img.height() as u64 * MAX_W as u64 / img.width() as u64) as u32;
+        image::imageops::resize(&img, MAX_W, h.max(1), image::imageops::FilterType::Lanczos3)
     } else {
         img
     };

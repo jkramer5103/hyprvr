@@ -284,6 +284,33 @@ async fn control_loop(
                     }
                 });
             }
+            ClientMsg::GetEnvironmentThumbs => {
+                let (conn, out) = (conn.clone(), out.clone());
+                tokio::spawn(async move {
+                    let r = async {
+                        let mut s = conn.open_uni().await?;
+                        let _ = s.set_priority(-2);
+                        let names = dd.environments();
+                        for name in names {
+                            let thumb = blocking({
+                                let (dd, name) = (dd.clone(), name.clone());
+                                move || dd.environment_thumb(&name)
+                            })
+                            .await;
+                            match thumb {
+                                Ok(data) => write_msg(&mut s, &StreamMsg::EnvironmentThumb { name, data }).await?,
+                                Err(e) => tracing::warn!("thumbnail {name}: {e:#}"),
+                            }
+                        }
+                        s.finish()?;
+                        anyhow::Ok(())
+                    }
+                    .await;
+                    if let Err(e) = r {
+                        let _ = out.send(ServerMsg::Error { message: format!("environment previews: {e:#}") });
+                    }
+                });
+            }
             ClientMsg::Hello { .. } | ClientMsg::PairStart { .. } | ClientMsg::PairConfirm { .. } => {
                 bail!("unexpected handshake message")
             }

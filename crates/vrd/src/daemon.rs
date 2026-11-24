@@ -49,6 +49,9 @@ impl Screen {
     }
 }
 
+/// Environment preview width (px).
+const THUMB_W: u32 = 384;
+
 pub struct Session {
     pub id: u64,
     pub conn: quinn::Connection,
@@ -619,6 +622,27 @@ impl Daemon {
             bail!("environment {name} is too large ({} MB, max 48)", len / 1024 / 1024);
         }
         Ok(std::fs::read(p)?)
+    }
+
+    /// Small JPEG preview of an environment, cached on disk by name + mtime.
+    pub fn environment_thumb(&self, name: &str) -> Result<Vec<u8>> {
+        if !self.environments().iter().any(|n| n == name) {
+            bail!("unknown environment {name}");
+        }
+        let p = self.cfg.environments_dir().join(name);
+        let mtime = std::fs::metadata(&p)?.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("hyprvr/thumbs");
+        let cached = cache_dir.join(format!("{name}.{mtime}.{THUMB_W}.jpg"));
+        if let Ok(d) = std::fs::read(&cached) {
+            return Ok(d);
+        }
+        let img = image::open(&p)?.to_rgb8();
+        let small = image::imageops::thumbnail(&img, THUMB_W, THUMB_W / 2);
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85).encode_image(&small)?;
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let _ = std::fs::write(&cached, &out);
+        Ok(out)
     }
 
     // ---------------------------------------------------------------- session lifecycle

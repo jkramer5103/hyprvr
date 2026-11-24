@@ -175,6 +175,8 @@ pub enum ClientMsg {
     GetEnvironment { name: String },
     Ping { client_time_us: u64 },
     Stats(ClientStats),
+    /// Ask for small previews of all environments (one uni stream of `EnvironmentThumb`s).
+    GetEnvironmentThumbs,
 }
 
 /// Server -> client, on the control stream.
@@ -214,6 +216,8 @@ pub enum StreamMsg {
     Resized { width: u32, height: u32 },
     /// Whole environment file (JPEG or PNG, equirectangular), on its own stream.
     EnvironmentImage { name: String, data: Vec<u8> },
+    /// Small JPEG preview of an environment; a stream carries one per environment.
+    EnvironmentThumb { name: String, data: Vec<u8> },
 }
 
 /// QUIC datagrams (unreliable, unordered). Keep under ~1100 bytes serialized.

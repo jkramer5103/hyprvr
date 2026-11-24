@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use hyprvr_proto::msg::ScreenId;
+use hyprvr_proto::msg::{Environment, ScreenId};
 
 /// UI pixels per meter in VR.
 pub const PX_PER_M: f32 = 1400.0;
@@ -32,6 +32,14 @@ pub enum Action {
     MenuDrag,
     /// Hide the main menu (bring it back with a left palm pinch or the menu button).
     MenuClose,
+    /// Open the environment picker.
+    EnvPicker,
+    /// Pick an environment (picker stays open).
+    EnvPick(Environment),
+    /// Picker page +/- 1.
+    EnvPage(i32),
+    /// Back from the picker to the main menu.
+    EnvBack,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +53,9 @@ pub enum Kind {
     Muted { text: String, size: f32 },
     /// Button with a small caption above a larger value.
     Tile { caption: String, value: String, active: bool },
+    /// Environment card: preview image (by key, see `Painter::set_image`) + name.
+    /// `loaded` makes the panel change (and re-render) when the preview arrives.
+    EnvCard { label: String, image: Option<String>, loaded: bool, active: bool, fill: [f32; 3] },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,7 +161,7 @@ pub fn toolbar(s: &ToolbarState) -> UiPanel {
     }
     tiles.push(tile("Layout", "Recenter".into(), false, Action::Recenter));
     tiles.push(tile("Audio", if s.audio_headset { "Headset" } else { "Laptop" }.into(), s.audio_headset, Action::ToggleAudio));
-    tiles.push(tile("Environment", pretty_name(&s.env_name), false, Action::NextEnv));
+    tiles.push(tile("Environment", pretty_name(&s.env_name), false, Action::EnvPicker));
     // Slot for the dim slider.
     let slider_slot = tiles.len();
     tiles.push(tile("", String::new(), false, Action::Dim));
@@ -178,6 +189,65 @@ pub fn toolbar(s: &ToolbarState) -> UiPanel {
         widgets.push(Widget { x, y: ty, w: tw, h: TILE_H, kind, action: Some(action) });
     }
     let h = y + rows as f32 * (TILE_H + GAP) - GAP + MARGIN;
+    UiPanel { w: w as u32, h: h.ceil() as u32, widgets }
+}
+
+/// Environments per picker page.
+pub const PICKER_COLS: usize = 5;
+pub const PICKER_PER_PAGE: usize = PICKER_COLS * 3;
+
+/// Environment picker: Passthrough / Void / every image, as preview cards.
+/// `loaded(name)` tells whether a preview image has arrived.
+pub fn env_picker(envs: &[String], current: &Environment, passthrough: bool, page: usize, loaded: &dyn Fn(&str) -> bool) -> UiPanel {
+    let w = 1400.0f32;
+    let mut items: Vec<Environment> = Vec::new();
+    if passthrough {
+        items.push(Environment::Passthrough);
+    }
+    items.push(Environment::Void);
+    items.extend(envs.iter().cloned().map(Environment::Image));
+    let pages = items.len().div_ceil(PICKER_PER_PAGE).max(1);
+    let page = page.min(pages - 1);
+
+    let mut widgets = Vec::new();
+    let back_w = 140.0;
+    let nav_w = 76.0;
+    let right = w - MARGIN;
+    let back_x = right - back_w;
+    let nav_x = back_x - GAP - nav_w * 2.0 - 8.0 - 90.0;
+    widgets.push(Widget { x: 0.0, y: 0.0, w: if pages > 1 { nav_x - GAP } else { back_x - GAP }, h: HEADER_H, kind: Kind::Handle, action: Some(Action::MenuDrag) });
+    widgets.push(Widget { x: 64.0, y: 0.0, w: 400.0, h: HEADER_H, kind: Kind::Text { text: "Environment".into(), size: 34.0 }, action: None });
+    if pages > 1 {
+        let by = 14.0;
+        let bh = HEADER_H - 28.0;
+        widgets.push(Widget { x: nav_x, y: by, w: nav_w, h: bh, kind: Kind::Button { label: "‹".into(), active: false }, action: (page > 0).then_some(Action::EnvPage(-1)) });
+        widgets.push(Widget { x: nav_x + nav_w + 4.0, y: 0.0, w: 90.0, h: HEADER_H, kind: Kind::Muted { text: format!(" {}/{}", page + 1, pages), size: 24.0 }, action: None });
+        widgets.push(Widget { x: nav_x + nav_w + 98.0, y: by, w: nav_w, h: bh, kind: Kind::Button { label: "›".into(), active: false }, action: (page + 1 < pages).then_some(Action::EnvPage(1)) });
+    }
+    widgets.push(Widget { x: back_x, y: 14.0, w: back_w, h: HEADER_H - 28.0, kind: Kind::Button { label: "Back".into(), active: false }, action: Some(Action::EnvBack) });
+
+    let cw = (w - MARGIN * 2.0 - GAP * (PICKER_COLS as f32 - 1.0)) / PICKER_COLS as f32;
+    let ch = (cw - 16.0) / 2.0 + 16.0 + 46.0;
+    let y0 = HEADER_H + 6.0;
+    for (i, env) in items.iter().skip(page * PICKER_PER_PAGE).take(PICKER_PER_PAGE).enumerate() {
+        let (r, c) = (i / PICKER_COLS, i % PICKER_COLS);
+        let (label, image, fill) = match env {
+            Environment::Passthrough => ("Passthrough".to_string(), None, [0.42, 0.45, 0.50]),
+            Environment::Void => ("Void".to_string(), None, [0.02, 0.02, 0.03]),
+            Environment::Image(n) => (pretty_name(n), Some(n.clone()), [0.12, 0.13, 0.17]),
+        };
+        let loaded = image.as_deref().is_some_and(loaded);
+        widgets.push(Widget {
+            x: MARGIN + c as f32 * (cw + GAP),
+            y: y0 + r as f32 * (ch + GAP),
+            w: cw,
+            h: ch,
+            kind: Kind::EnvCard { label, image, loaded, active: env == current, fill },
+            action: Some(Action::EnvPick(env.clone())),
+        });
+    }
+    // Fixed height (3 rows), so the panel doesn't jump between pages.
+    let h = y0 + 3.0 * (ch + GAP) - GAP + MARGIN;
     UiPanel { w: w as u32, h: h.ceil() as u32, widgets }
 }
 
@@ -264,6 +334,8 @@ pub fn panel_chrome(screen: ScreenId, curved: bool, label: &str) -> UiPanel {
 pub struct Painter {
     font: fontdue::Font,
     cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
+    /// Straight-alpha RGBA images by key (environment previews).
+    images: HashMap<String, (u32, u32, Vec<u8>)>,
 }
 
 impl Default for Painter {
@@ -285,7 +357,19 @@ const MUTED: Rgba = [0.60, 0.63, 0.72, 1.0];
 impl Painter {
     pub fn new() -> Self {
         let font = fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default()).expect("embedded font");
-        Painter { font, cache: HashMap::new() }
+        Painter { font, cache: HashMap::new(), images: HashMap::new() }
+    }
+
+    pub fn set_image(&mut self, key: &str, w: u32, h: u32, rgba: Vec<u8>) {
+        self.images.insert(key.to_string(), (w, h, rgba));
+    }
+
+    pub fn has_image(&self, key: &str) -> bool {
+        self.images.contains_key(key)
+    }
+
+    pub fn clear_images(&mut self) {
+        self.images.clear();
     }
 
     /// Render a panel; `hover` = index of hovered widget (highlighted). Premultiplied RGBA8.
@@ -340,6 +424,24 @@ impl Painter {
                 }
                 Kind::Text { text, size } => {
                     self.text(&mut img, text, w.x, w.y + w.h / 2.0, *size, TEXT, false, w.w);
+                }
+                Kind::EnvCard { label, image, active, fill, .. } => {
+                    if *active {
+                        img.round_rect(w.x - 5.0, w.y - 5.0, w.w + 10.0, w.h + 10.0, 18.0, [0.40, 0.58, 0.95, 1.0]);
+                    }
+                    let mut c = BTN;
+                    if hov {
+                        c = [c[0] + BTN_HOVER_ADD, c[1] + BTN_HOVER_ADD, c[2] + BTN_HOVER_ADD, 1.0];
+                    }
+                    img.round_rect(w.x, w.y, w.w, w.h, 14.0, c);
+                    let (ix, iy, iw) = (w.x + 8.0, w.y + 8.0, w.w - 16.0);
+                    let ih = iw / 2.0;
+                    match image.as_ref().and_then(|k| self.images.get(k)) {
+                        Some((sw, sh, px)) => img.image(ix, iy, iw, ih, *sw, *sh, px, if hov { 1.12 } else { 1.0 }),
+                        None => img.round_rect(ix, iy, iw, ih, 8.0, [fill[0], fill[1], fill[2], 1.0]),
+                    }
+                    let lc = if *active { TEXT } else { [0.85, 0.87, 0.92, 1.0] };
+                    self.text(&mut img, label, w.x + w.w / 2.0, iy + ih + 23.0, 24.0, lc, true, w.w - 20.0);
                 }
                 Kind::Muted { text, size } => {
                     self.text(&mut img, text, w.x, w.y + w.h / 2.0, *size, MUTED, false, w.w);
@@ -430,6 +532,31 @@ impl Img {
         for k in 0..4 {
             let d = self.px[i + k] as f32 / 255.0;
             self.px[i + k] = ((c[k] + d * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+    }
+
+    /// Bilinear-scaled opaque image into (x, y, w, h); `gain` brightens (hover).
+    #[allow(clippy::too_many_arguments)]
+    fn image(&mut self, x: f32, y: f32, w: f32, h: f32, sw: u32, sh: u32, px: &[u8], gain: f32) {
+        let (x0, y0) = (x.round() as i32, y.round() as i32);
+        let (dw, dh) = (w.round() as i32, h.round() as i32);
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let u = ((dx as f32 + 0.5) / dw as f32 * sw as f32 - 0.5).clamp(0.0, sw as f32 - 1.0);
+                let v = ((dy as f32 + 0.5) / dh as f32 * sh as f32 - 0.5).clamp(0.0, sh as f32 - 1.0);
+                let (u0, v0) = (u.floor() as u32, v.floor() as u32);
+                let (u1, v1) = ((u0 + 1).min(sw - 1), (v0 + 1).min(sh - 1));
+                let (fu, fv) = (u - u0 as f32, v - v0 as f32);
+                let at = |uu: u32, vv: u32, k: usize| px[((vv * sw + uu) * 4) as usize + k] as f32 / 255.0;
+                let mut c = [0.0f32; 4];
+                for (k, ck) in c.iter_mut().enumerate().take(3) {
+                    let top = at(u0, v0, k) * (1.0 - fu) + at(u1, v0, k) * fu;
+                    let bot = at(u0, v1, k) * (1.0 - fu) + at(u1, v1, k) * fu;
+                    *ck = ((top * (1.0 - fv) + bot * fv) * gain).min(1.0);
+                }
+                c[3] = 1.0;
+                self.blend(x0 + dx, y0 + dy, c);
+            }
         }
     }
 
@@ -528,6 +655,35 @@ mod tests {
                 let img = painter.render(&c, None);
                 dump_ppm(&format!("{dir}/chrome.ppm"), c.w, c.h, &img);
             }
+        }
+    }
+
+    #[test]
+    fn env_picker_pages_and_picks() {
+        let envs: Vec<String> = (0..20).map(|i| format!("env_{i:02}.jpg")).collect();
+        let cur = Environment::Image("env_03.jpg".into());
+        let p = env_picker(&envs, &cur, true, 0, &|n| n != "env_01.jpg");
+        let cards: Vec<_> = p.widgets.iter().filter(|w| matches!(w.kind, Kind::EnvCard { .. })).collect();
+        assert_eq!(cards.len(), PICKER_PER_PAGE);
+        assert_eq!(cards[0].action, Some(Action::EnvPick(Environment::Passthrough)));
+        assert!(matches!(cards[5].kind, Kind::EnvCard { active: true, .. }));
+        assert!(p.h <= 760, "picker must fit the menu surface: {}", p.h);
+        for w in &p.widgets {
+            assert!(w.x >= 0.0 && w.x + w.w <= p.w as f32 && w.y + w.h <= p.h as f32, "{w:?}");
+        }
+        // Last page: the rest, and page index clamps.
+        let last = env_picker(&envs, &cur, true, 99, &|_| true);
+        let n = last.widgets.iter().filter(|w| matches!(w.kind, Kind::EnvCard { .. })).count();
+        assert_eq!(n, 22 - PICKER_PER_PAGE);
+        if let Ok(dir) = std::env::var("UI_PREVIEW_DIR") {
+            let mut painter = Painter::new();
+            // Fake previews: gradients.
+            for (i, e) in envs.iter().enumerate() {
+                let px: Vec<u8> = (0..64 * 32).flat_map(|j| [(j % 64 * 4) as u8, (i * 12) as u8, (j / 64 * 8) as u8, 255]).collect();
+                painter.set_image(e, 64, 32, px);
+            }
+            let img = painter.render(&p, Some(8));
+            dump_ppm(&format!("{dir}/picker.ppm"), p.w, p.h, &img);
         }
     }
 
