@@ -93,7 +93,13 @@ vrd unpair all
 ready‑to‑paste Waybar and Quickshell snippets at the end.
 
 **Config**: `~/.config/hyprvr/config.toml` (codec, bitrate, default screens, …).
-**Environments**: put equirectangular `.jpg`/`.png` files in `~/.config/hyprvr/environments/`.
+**Environments**: put equirectangular `.jpg`/`.png` files in `~/.config/hyprvr/environments/`
+(`vrd env dir` prints the folder). Or get 10 free ones: press **Download** in the headset's
+environment picker (shown while the folder is empty), or run `vrd env fetch`. They are not
+bundled. hyprvr downloads the originals from Poly Haven (CC0), Wikimedia Commons and ESO
+(CC BY / CC BY-SA, ~250 MB), converts them locally (~65 MB), and writes `CREDITS.md` next to
+them. `vrd env credits` lists the photographers and licenses. The headset shows the credit of
+the current one in the picker.
 
 ## Troubleshooting
 

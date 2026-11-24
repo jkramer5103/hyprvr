@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hyprvr_proto::msg::{
-    AudioTarget, ClientStats, Datagram, Environment, PanelLayout, PointerButton, ScreenId, ScreenInfo, ScreenKind,
+    AudioTarget, ClientStats, Datagram, EnvFetch, Environment, PanelLayout, PointerButton, ScreenId, ScreenInfo, ScreenKind,
     ServerMsg, ServerState, Settings, encode_datagram,
 };
 use hyprvr_proto::pairing::{Fingerprint, MAX_ATTEMPTS, generate_pin};
@@ -81,6 +81,8 @@ struct Inner {
     last_bytes: HashMap<ScreenId, u64>,
     bitrate_kbps: u32,
     comp_failures: u32,
+    /// Recommended-environments download started from the headset.
+    env_fetch: Option<EnvFetch>,
 }
 
 /// What the cursor / pointer paths need, without taking `inner`.
@@ -183,6 +185,7 @@ impl Daemon {
                 last_bytes: HashMap::new(),
                 bitrate_kbps: 0,
                 comp_failures: 0,
+                env_fetch: None,
             }),
             routes: RwLock::new(vec![]),
             active: RwLock::new(None),
@@ -541,6 +544,7 @@ impl Daemon {
             settings: inner.store.settings.clone(),
             environments: self.environments(),
             mirrorable: inner.physical.iter().map(|m| m.name.clone()).filter(|n| !mirrored.contains(&n.as_str())).collect(),
+            env_fetch: inner.env_fetch.clone(),
         }
     }
 
@@ -609,6 +613,64 @@ impl Daemon {
             .unwrap_or_default();
         v.sort();
         v
+    }
+
+    /// The environments folder changed (e.g. `vrd env fetch`): send the new list.
+    pub fn environments_changed(&self) {
+        self.broadcast_state(&self.inner.lock().unwrap());
+    }
+
+    /// Download the missing recommended environments in the background, reporting progress
+    /// in `ServerState::env_fetch`.
+    pub fn fetch_environments(self: &Arc<Self>) -> Result<()> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.env_fetch.as_ref().is_some_and(|f| f.running) {
+                bail!("the download is already running");
+            }
+            inner.env_fetch = Some(EnvFetch { running: true, ..Default::default() });
+            self.broadcast_state(&inner);
+        }
+        let d = self.clone();
+        std::thread::Builder::new().name("env-fetch".into()).spawn(move || {
+            let dir = d.cfg.environments_dir();
+            tracing::info!("downloading recommended environments into {}", dir.display());
+            let update = |f: &dyn Fn(&mut EnvFetch)| {
+                let mut inner = d.inner.lock().unwrap();
+                if let Some(st) = &mut inner.env_fetch {
+                    f(st);
+                }
+                d.broadcast_state(&inner);
+            };
+            // A panic must not leave the headset showing "downloading" forever.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::envfetch::fetch_missing(&dir, &mut |ev| match ev {
+                crate::envfetch::Event::Start { index, total, item } => update(&|s| {
+                    s.done = index as u32;
+                    s.total = total as u32;
+                    s.current = item.title.into();
+                    s.percent = 0;
+                }),
+                crate::envfetch::Event::Progress { percent } => update(&|s| s.percent = percent),
+                crate::envfetch::Event::Converting => update(&|s| s.percent = 100),
+                // The new file shows up in `environments` with this broadcast.
+                crate::envfetch::Event::Done => update(&|s| s.done += 1),
+                crate::envfetch::Event::Failed { .. } => {}
+            })))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("internal error (see the vrd log)")));
+            let mut inner = d.inner.lock().unwrap();
+            inner.env_fetch = match r {
+                Ok(n) => {
+                    tracing::info!("environments: {n} added");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("environment download: {e:#}");
+                    Some(EnvFetch { error: Some(format!("{e:#}")), ..Default::default() })
+                }
+            };
+            d.broadcast_state(&inner);
+        })?;
+        Ok(())
     }
 
     /// Read an environment image by name (must be one of `environments()`).

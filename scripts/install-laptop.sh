@@ -133,5 +133,6 @@ Quickshell (QML), e.g. inside your bar:
 Next steps:
   vrd status          # daemon state
   vrd pin             # show pairing PIN (also sent as a notification)
+  vrd env fetch       # download 10 free 360° environments (credited, see vrd env credits)
   Config: ~/.config/hyprvr/config.toml   Environments: ~/.config/hyprvr/environments/*.jpg|png
 SNIP

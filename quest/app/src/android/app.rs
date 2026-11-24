@@ -698,6 +698,11 @@ impl App {
         {
             self.send(ClientMsg::GetEnvironment { name: name.clone() });
         }
+        let new_envs = self.state.as_ref().is_none_or(|o| o.environments != s.environments);
+        if new_envs && self.env_picker.is_some() && s.environments.iter().any(|e| !self.painter.has_image(e)) {
+            self.thumbs_requested = Some(Instant::now());
+            self.send(ClientMsg::GetEnvironmentThumbs);
+        }
         self.state = Some(s);
         if changed {
             self.send(ClientMsg::SetLayout(self.layout.clone()));
@@ -1265,6 +1270,7 @@ impl App {
                 }
             }
             Action::EnvBack => self.env_picker = None,
+            Action::EnvFetch => self.send(ClientMsg::FetchEnvironments),
             Action::EnvRotate => {
                 if let Environment::Image(name) = &self.settings.environment {
                     let y = self.settings.env_yaw.entry(name.clone()).or_insert(0);
@@ -1595,6 +1601,7 @@ impl App {
                     &self.settings.environment,
                     self.passthrough.is_some(),
                     self.env_picker.unwrap_or(0),
+                    self.state.as_ref().and_then(|s| s.env_fetch.as_ref()),
                     &|n| painter.has_image(n),
                 )
             }

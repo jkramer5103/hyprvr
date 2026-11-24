@@ -51,6 +51,7 @@ fn state() -> ServerState {
         settings: Settings::default(),
         environments: vec![],
         mirrorable: vec![],
+        env_fetch: None,
     }
 }
 

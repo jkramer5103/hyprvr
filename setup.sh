@@ -59,4 +59,6 @@ cat <<'EOF'
 Put on the headset and open hyprvr (Library → Unknown Sources).
 It finds the laptop on your network; type the PIN it asks for:
     vrd pin
+Free 360° backgrounds: press Download in the headset's environment picker,
+or run: vrd env fetch
 EOF

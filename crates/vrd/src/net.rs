@@ -311,6 +311,7 @@ async fn control_loop(
                     }
                 });
             }
+            ClientMsg::FetchEnvironments => blocking(move || dd.fetch_environments()).await.unwrap_or_else(err),
             ClientMsg::Hello { .. } | ClientMsg::PairStart { .. } | ClientMsg::PairConfirm { .. } => {
                 bail!("unexpected handshake message")
             }

@@ -5,6 +5,7 @@ mod compositor;
 mod config;
 mod daemon;
 mod encode;
+mod envfetch;
 mod ipc;
 mod layout;
 mod net;
@@ -70,6 +71,11 @@ enum Cmd {
         #[arg(default_value = "all")]
         which: String,
     },
+    /// Environments (360° backgrounds in the headset).
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
     /// Continuous JSON for a bar module (Waybar `custom` / quickshell). Same as `status --follow --json`.
     Waybar,
 }
@@ -87,6 +93,17 @@ enum ScreenCmd {
     Remove { id: u32 },
     /// Resize a virtual screen, e.g. `vrd screen resize 2 2560x1440`.
     Resize { id: u32, size: String },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Download the free recommended environments (~250 MB from Poly Haven, Wikimedia
+    /// Commons and ESO) and convert them into the environments folder.
+    Fetch,
+    /// Show who made the recommended environments, and their licenses.
+    Credits,
+    /// Print the environments folder (drop your own equirectangular .jpg/.png files here).
+    Dir,
 }
 
 #[derive(Subcommand)]
@@ -119,6 +136,14 @@ fn main() {
         Cmd::Audio { target } => simple(&Request::Audio { target }),
         Cmd::Layout { cmd: LayoutCmd::Reset } => simple(&Request::LayoutReset),
         Cmd::Unpair { which } => simple(&Request::Unpair { which }),
+        Cmd::Env { cmd } => match cmd {
+            EnvCmd::Fetch => cmd_env_fetch(),
+            EnvCmd::Credits => {
+                cmd_env_credits();
+                Ok(())
+            }
+            EnvCmd::Dir => Config::load().map(|c| println!("{}", c.environments_dir().display())),
+        },
     };
     if let Err(e) = r {
         eprintln!("vrd: {e:#}");
@@ -127,6 +152,69 @@ fn main() {
 }
 
 // ------------------------------------------------------------------------- CLI client
+
+fn cmd_env_fetch() -> Result<()> {
+    use hyprvr_proto::environments::{RECOMMENDED, total_bytes};
+    use std::io::IsTerminal;
+    let dir = Config::load()?.environments_dir();
+    let todo = envfetch::missing(&dir);
+    if todo.is_empty() {
+        envfetch::write_credits(&dir)?;
+        println!("All {} recommended environments are already in {}", RECOMMENDED.len(), dir.display());
+        return Ok(());
+    }
+    let mb: u64 = todo.iter().map(|r| r.bytes).sum::<u64>() / 1_000_000;
+    println!(
+        "Downloading {} of {} environments ({mb} MB of {} MB) into {}",
+        todo.len(),
+        RECOMMENDED.len(),
+        total_bytes() / 1_000_000,
+        dir.display()
+    );
+    let tty = std::io::stdout().is_terminal();
+    let mut line = String::new();
+    let mut out = std::io::stdout();
+    let r = envfetch::fetch_missing(&dir, &mut |ev| match ev {
+        envfetch::Event::Start { index, total, item } => {
+            line = format!("[{}/{total}] {} ({}, {})", index + 1, item.title, item.author, item.license);
+            if tty {
+                let _ = write!(out, "\r\x1b[K{line}");
+            } else {
+                println!("{line}");
+            }
+            let _ = out.flush();
+        }
+        envfetch::Event::Progress { percent } if tty => {
+            let _ = write!(out, "\r\x1b[K{line}  {percent}%");
+            let _ = out.flush();
+        }
+        envfetch::Event::Converting if tty => {
+            let _ = write!(out, "\r\x1b[K{line}  converting");
+            let _ = out.flush();
+        }
+        envfetch::Event::Done if tty => println!("\r\x1b[K{line}  done"),
+        envfetch::Event::Failed { error, .. } => {
+            if tty {
+                println!("\r\x1b[K{line}  FAILED");
+            }
+            eprintln!("    {error}");
+        }
+        _ => {}
+    });
+    // Let a running daemon tell the headset; fine if it isn't running.
+    let _ = request(&Request::EnvironmentsChanged);
+    let n = r?;
+    println!("Added {n} environment(s). Credits: {}", dir.join("CREDITS.md").display());
+    Ok(())
+}
+
+fn cmd_env_credits() {
+    use hyprvr_proto::environments::RECOMMENDED;
+    println!("Recommended environments (downloaded from the source by `vrd env fetch`):\n");
+    for r in RECOMMENDED {
+        println!("{}\n    {}, {}\n    {}\n", r.title, r.author, r.license, r.source);
+    }
+}
 
 fn connect() -> Result<UnixStream> {
     UnixStream::connect(ipc::socket_path()).context("hyprvr daemon is not running (systemctl --user start vrd)")
@@ -464,6 +552,10 @@ async fn handle_request(d: &Arc<Daemon>, req: Request) -> Response {
                 Ok("layout reset".into())
             }
             Request::Unpair { which } => d.unpair(&which).map(|n| format!("removed {n} paired headset(s)")),
+            Request::EnvironmentsChanged => {
+                d.environments_changed();
+                Ok(String::new())
+            }
             Request::Subscribe => unreachable!(),
         };
         match r {

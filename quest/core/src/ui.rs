@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use hyprvr_proto::msg::{Environment, ScreenId};
+use hyprvr_proto::environments::{RECOMMENDED, credit_line, recommended, total_bytes};
+use hyprvr_proto::msg::{EnvFetch, Environment, ScreenId};
 
 /// UI pixels per meter in VR.
 pub const PX_PER_M: f32 = 1400.0;
@@ -42,6 +43,8 @@ pub enum Action {
     EnvBack,
     /// Turn the current environment by 90°.
     EnvRotate,
+    /// Download the recommended free environments on the PC.
+    EnvFetch,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,14 +208,33 @@ pub const PICKER_PER_PAGE: usize = PICKER_COLS * 3;
 
 /// Environment picker: Passthrough / Void / every image, as preview cards.
 /// `loaded(name)` tells whether a preview image has arrived.
-pub fn env_picker(envs: &[String], current: &Environment, passthrough: bool, page: usize, loaded: &dyn Fn(&str) -> bool) -> UiPanel {
-    let w = 1400.0f32;
-    let mut items: Vec<Environment> = Vec::new();
-    if passthrough {
-        items.push(Environment::Passthrough);
+///
+/// With no images yet (or while a download runs / after it failed) a tile offers the
+/// recommended free environments (`hyprvr_proto::environments`); `fetch` is the daemon's
+/// download state. A footer line credits the current environment if it is a recommended one.
+pub fn env_picker(
+    envs: &[String],
+    current: &Environment,
+    passthrough: bool,
+    page: usize,
+    fetch: Option<&EnvFetch>,
+    loaded: &dyn Fn(&str) -> bool,
+) -> UiPanel {
+    enum Item {
+        Env(Environment),
+        Fetch,
     }
-    items.push(Environment::Void);
-    items.extend(envs.iter().cloned().map(Environment::Image));
+    let w = 1400.0f32;
+    let mut items: Vec<Item> = Vec::new();
+    if passthrough {
+        items.push(Item::Env(Environment::Passthrough));
+    }
+    items.push(Item::Env(Environment::Void));
+    items.extend(envs.iter().cloned().map(|e| Item::Env(Environment::Image(e))));
+    let offer = envs.is_empty() || fetch.is_some();
+    if offer {
+        items.push(Item::Fetch);
+    }
     let pages = items.len().div_ceil(PICKER_PER_PAGE).max(1);
     let page = page.min(pages - 1);
 
@@ -241,8 +263,28 @@ pub fn env_picker(envs: &[String], current: &Environment, passthrough: bool, pag
     let cw = (w - MARGIN * 2.0 - GAP * (PICKER_COLS as f32 - 1.0)) / PICKER_COLS as f32;
     let ch = (cw - 16.0) / 2.0 + 16.0 + 46.0;
     let y0 = HEADER_H + 6.0;
-    for (i, env) in items.iter().skip(page * PICKER_PER_PAGE).take(PICKER_PER_PAGE).enumerate() {
+    let shown: Vec<&Item> = items.iter().skip(page * PICKER_PER_PAGE).take(PICKER_PER_PAGE).collect();
+    for (i, item) in shown.iter().enumerate() {
         let (r, c) = (i / PICKER_COLS, i % PICKER_COLS);
+        let (x, y) = (MARGIN + c as f32 * (cw + GAP), y0 + r as f32 * (ch + GAP));
+        let env = match item {
+            Item::Env(e) => e,
+            Item::Fetch => {
+                let (caption, value, action) = match fetch {
+                    Some(f) if f.running && f.total == 0 => ("Free environments".to_string(), "Starting…".to_string(), None),
+                    Some(f) if f.running => {
+                        let step = (f.done + 1).min(f.total);
+                        let value = if f.percent >= 100 { "Converting…".to_string() } else { format!("{} %", f.percent) };
+                        (format!("Downloading {step} of {}", f.total), value, None)
+                    }
+                    Some(f) if f.error.is_some() => ("Download failed".to_string(), "Retry".to_string(), Some(Action::EnvFetch)),
+                    _ => (format!("{} free 360° photos", RECOMMENDED.len()), "Download".to_string(), Some(Action::EnvFetch)),
+                };
+                // Same height as a card, a bit inset so it reads as a button, not a preview.
+                widgets.push(Widget { x, y: y + 8.0, w: cw, h: ch - 16.0, kind: Kind::Tile { caption, value, active: action.is_some() }, action });
+                continue;
+            }
+        };
         let (label, image, fill) = match env {
             Environment::Passthrough => ("Passthrough".to_string(), None, [0.42, 0.45, 0.50]),
             Environment::Void => ("Void".to_string(), None, [0.02, 0.02, 0.03]),
@@ -250,17 +292,47 @@ pub fn env_picker(envs: &[String], current: &Environment, passthrough: bool, pag
         };
         let loaded = image.as_deref().is_some_and(loaded);
         widgets.push(Widget {
-            x: MARGIN + c as f32 * (cw + GAP),
-            y: y0 + r as f32 * (ch + GAP),
+            x,
+            y,
             w: cw,
             h: ch,
             kind: Kind::EnvCard { label, image, loaded, active: env == current, fill },
             action: Some(Action::EnvPick(env.clone())),
         });
     }
-    // Fixed height (3 rows), so the panel doesn't jump between pages.
-    let h = y0 + 3.0 * (ch + GAP) - GAP + MARGIN;
+    // With only Passthrough / Void / the download tile, explain it in the empty space below.
+    if envs.is_empty() && shown.len() <= PICKER_COLS {
+        let lines = [
+            format!("{} free 360° photos from Poly Haven, Wikimedia Commons and ESO,", RECOMMENDED.len()),
+            format!("about {} MB, downloaded on the PC straight from their sources.", total_bytes().div_ceil(10_000_000) * 10),
+            "Or copy your own 360° .jpg / .png files into".to_string(),
+            "~/.config/hyprvr/environments on the PC (see: vrd env dir).".to_string(),
+        ];
+        let mut y = y0 + ch + GAP + 10.0;
+        for (i, l) in lines.into_iter().enumerate() {
+            widgets.push(Widget { x: MARGIN + 6.0, y, w: w - MARGIN * 2.0 - 12.0, h: 34.0, kind: Kind::Muted { text: l, size: 24.0 }, action: None });
+            y += if i == 1 { 52.0 } else { 36.0 };
+        }
+    }
+    // Fixed height (3 rows + footer), so the panel doesn't jump between pages.
+    let footer_y = y0 + 3.0 * (ch + GAP) - GAP + 6.0;
+    let footer = match (fetch, current) {
+        (Some(f), _) if f.running && !f.current.is_empty() => {
+            recommended_by_title(&f.current).map_or_else(|| f.current.clone(), |r| format!("Downloading {}", credit_line(r)))
+        }
+        (Some(EnvFetch { error: Some(e), .. }), _) => format!("Last attempt: {e}"),
+        (_, Environment::Image(n)) => recommended(n).map(credit_line).unwrap_or_default(),
+        _ => String::new(),
+    };
+    if !footer.is_empty() {
+        widgets.push(Widget { x: MARGIN + 6.0, y: footer_y, w: w - MARGIN * 2.0 - 12.0, h: 34.0, kind: Kind::Muted { text: footer, size: 22.0 }, action: None });
+    }
+    let h = footer_y + 34.0 + MARGIN - 6.0;
     UiPanel { w: w as u32, h: h.ceil() as u32, widgets }
+}
+
+fn recommended_by_title(title: &str) -> Option<&'static hyprvr_proto::environments::Recommended> {
+    RECOMMENDED.iter().find(|r| r.title == title)
 }
 
 /// Number pad for the pairing PIN.
@@ -674,7 +746,7 @@ mod tests {
     fn env_picker_pages_and_picks() {
         let envs: Vec<String> = (0..20).map(|i| format!("env_{i:02}.jpg")).collect();
         let cur = Environment::Image("env_03.jpg".into());
-        let p = env_picker(&envs, &cur, true, 0, &|n| n != "env_01.jpg");
+        let p = env_picker(&envs, &cur, true, 0, None, &|n| n != "env_01.jpg");
         let cards: Vec<_> = p.widgets.iter().filter(|w| matches!(w.kind, Kind::EnvCard { .. })).collect();
         assert_eq!(cards.len(), PICKER_PER_PAGE);
         assert_eq!(cards[0].action, Some(Action::EnvPick(Environment::Passthrough)));
@@ -686,7 +758,7 @@ mod tests {
             assert!(w.x >= 0.0 && w.x + w.w <= p.w as f32 && w.y + w.h <= p.h as f32, "{w:?}");
         }
         // Last page: the rest, and page index clamps.
-        let last = env_picker(&envs, &cur, true, 99, &|_| true);
+        let last = env_picker(&envs, &cur, true, 99, None, &|_| true);
         let n = last.widgets.iter().filter(|w| matches!(w.kind, Kind::EnvCard { .. })).count();
         assert_eq!(n, 22 - PICKER_PER_PAGE);
         if let Ok(dir) = std::env::var("UI_PREVIEW_DIR") {
@@ -698,6 +770,51 @@ mod tests {
             }
             let img = painter.render(&p, Some(8));
             dump_ppm(&format!("{dir}/picker.ppm"), p.w, p.h, &img);
+        }
+    }
+
+    #[test]
+    fn env_picker_offers_download_when_empty() {
+        let tile = |p: &UiPanel| p.widgets.iter().find(|w| matches!(w.kind, Kind::Tile { .. })).cloned();
+        let check = |p: &UiPanel| {
+            assert!(p.h <= 760, "picker must fit the menu surface: {}", p.h);
+            for w in &p.widgets {
+                assert!(w.x >= 0.0 && w.y >= 0.0 && w.x + w.w <= p.w as f32 && w.y + w.h <= p.h as f32, "{w:?}");
+            }
+        };
+        // Empty folder: Passthrough, Void, Download.
+        let p = env_picker(&[], &Environment::Void, true, 0, None, &|_| false);
+        check(&p);
+        let t = tile(&p).unwrap();
+        assert_eq!(t.action, Some(Action::EnvFetch));
+        assert_eq!(p.hit(t.x + 5.0, t.y + 5.0).unwrap().0, Action::EnvFetch);
+        // Running: progress, not clickable; stays visible once the first files arrived.
+        let run = EnvFetch { running: true, done: 2, total: 10, current: "Lakeside".into(), percent: 42, error: None };
+        let envs = vec!["comfy_cafe.jpg".to_string(), "lakeside.jpg".to_string()];
+        let p2 = env_picker(&envs, &Environment::Void, true, 0, Some(&run), &|_| true);
+        check(&p2);
+        let t = tile(&p2).unwrap();
+        assert_eq!(t.action, None);
+        assert!(matches!(&t.kind, Kind::Tile { caption, value, .. } if caption == "Downloading 3 of 10" && value == "42 %"));
+        // Failed: Retry.
+        let bad = EnvFetch { error: Some("1 of 10 failed: Lakeside".into()), ..Default::default() };
+        let p3 = env_picker(&envs, &Environment::Void, true, 0, Some(&bad), &|_| true);
+        assert_eq!(tile(&p3).unwrap().action, Some(Action::EnvFetch));
+        // Images present, idle: no tile; credit line for a recommended image.
+        let p4 = env_picker(&envs, &Environment::Image("lakeside.jpg".into()), true, 0, None, &|_| true);
+        check(&p4);
+        assert!(tile(&p4).is_none());
+        assert!(p4.widgets.iter().any(|w| matches!(&w.kind, Kind::Muted { text, .. } if text.contains("Greg Zaal"))));
+        if let Ok(dir) = std::env::var("UI_PREVIEW_DIR") {
+            let mut painter = Painter::new();
+            for (i, e) in envs.iter().enumerate() {
+                let px: Vec<u8> = (0..64 * 32).flat_map(|j| [(j % 64 * 4) as u8, (i * 60) as u8, (j / 64 * 8) as u8, 255]).collect();
+                painter.set_image(e, 64, 32, px);
+            }
+            for (name, p) in [("picker_empty", &p), ("picker_downloading", &p2), ("picker_failed", &p3), ("picker_credit", &p4)] {
+                let img = painter.render(p, None);
+                dump_ppm(&format!("{dir}/{name}.ppm"), p.w, p.h, &img);
+            }
         }
     }
 

@@ -23,6 +23,8 @@ pub enum Request {
     LayoutReset,
     /// `which`: "all", or a client name / fingerprint prefix.
     Unpair { which: String },
+    /// The environments folder changed; tell the headset.
+    EnvironmentsChanged,
     /// Stream `Status` lines on every change.
     Subscribe,
 }

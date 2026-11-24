@@ -118,6 +118,23 @@ pub struct ServerState {
     pub environments: Vec<String>,
     /// Physical outputs that can be mirrored with `ClientMsg::AddMirror`.
     pub mirrorable: Vec<String>,
+    /// Download of the recommended environments (`ClientMsg::FetchEnvironments`): running,
+    /// or the error of the last attempt. `None` when idle and nothing went wrong.
+    pub env_fetch: Option<EnvFetch>,
+}
+
+/// Progress of the recommended-environments download.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct EnvFetch {
+    pub running: bool,
+    /// Files finished so far / files to fetch in this run.
+    pub done: u32,
+    pub total: u32,
+    /// Title of the file in progress.
+    pub current: String,
+    /// Download progress of the current file, 0..=100 (100 while converting).
+    pub percent: u8,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,9 +197,13 @@ pub enum ClientMsg {
     Stats(ClientStats),
     /// Ask for small previews of all environments (one uni stream of `EnvironmentThumb`s).
     GetEnvironmentThumbs,
+    /// Download the recommended free environments that are missing (see
+    /// `environments::RECOMMENDED`); progress arrives in `ServerState::env_fetch`.
+    FetchEnvironments,
 }
 
 /// Server -> client, on the control stream.
+#[allow(clippy::large_enum_variant)] // `State` is sent rarely; boxing buys nothing here.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ServerMsg {
     /// Reply to Hello. If `paired` is false the client must pair (the PIN is shown on the PC).

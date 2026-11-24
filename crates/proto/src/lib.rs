@@ -7,6 +7,7 @@
 //! * QUIC **datagrams** for latency-sensitive, loss-tolerant data ([`msg::Datagram`]).
 
 pub mod discovery;
+pub mod environments;
 pub mod framing;
 pub mod msg;
 pub mod pairing;
@@ -14,7 +15,7 @@ pub mod tiles;
 pub mod tls;
 
 /// Bump on any incompatible wire change.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 /// QUIC (UDP) port the daemon listens on.
 pub const DEFAULT_PORT: u16 = 47800;
 /// UDP port for LAN discovery requests.

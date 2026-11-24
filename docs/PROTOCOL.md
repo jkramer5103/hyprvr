@@ -1,4 +1,4 @@
-# Wire protocol (v1)
+# Wire protocol (v2)
 
 Source of truth: `crates/proto/src/msg.rs`. Serialization: postcard. Streams carry
 `u32 LE length + postcard` frames (`proto::framing`).
@@ -13,6 +13,8 @@ Source of truth: `crates/proto/src/msg.rs`. Serialization: postcard. Streams car
   then `Tiles` / `VideoStart` / `VideoFrame` / `VideoStop` / `Resized`, applied in order.
   Streams for removed screens are finished; new screens get new streams.
 * Environment images: server-opened uni stream with one `EnvironmentImage`.
+  `FetchEnvironments` makes the daemon download the recommended free environments
+  (`proto::environments`); progress is reported in `State.env_fetch`.
 * Datagrams: `Cursor`, `Audio` (S->C), `PointerMove` (C->S).
 * Clock: `Ping`/`Pong` gives the client an offset to map `capture_us` (server monotonic
   clock, microseconds) to its own clock for latency stats.
