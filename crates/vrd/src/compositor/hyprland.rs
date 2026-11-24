@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +13,44 @@ use super::{Compositor, Monitor};
 
 pub struct Hyprland {
     dir: PathBuf,
+    /// Config parser flavour: 0 = unknown, 1 = legacy hyprlang (`keyword`), 2 = Lua (`eval`).
+    parser: AtomicU8,
+}
+
+/// One `monitor` rule.
+struct MonitorRule {
+    name: String,
+    mode: String,
+    position: String,
+    scale: String,
+    transform: i32,
+}
+
+impl MonitorRule {
+    fn legacy(&self) -> String {
+        let mut r = format!("keyword monitor {},{},{},{}", self.name, self.mode, self.position, self.scale);
+        if self.transform != 0 {
+            r.push_str(&format!(",transform,{}", self.transform));
+        }
+        r
+    }
+
+    fn lua(&self) -> String {
+        // Values are output names / numbers we produced; strip anything that could break the string literal.
+        let q = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.@x".contains(*c)).collect::<String>();
+        let mut r = format!(
+            "hl.monitor({{ output = \"{}\", mode = \"{}\", position = \"{}\", scale = {}",
+            q(&self.name),
+            q(&self.mode),
+            q(&self.position),
+            q(&self.scale)
+        );
+        if self.transform != 0 {
+            r.push_str(&format!(", transform = {}", self.transform));
+        }
+        r.push_str(" })");
+        r
+    }
 }
 
 #[derive(Deserialize)]
@@ -48,7 +87,7 @@ impl Hyprland {
             .into_iter()
             .find(|d| d.join(".socket.sock").exists())
             .context("Hyprland IPC socket not found")?;
-        Ok(Hyprland { dir })
+        Ok(Hyprland { dir, parser: AtomicU8::new(0) })
     }
 
     /// Send one raw request and return the full reply.
@@ -70,6 +109,34 @@ impl Hyprland {
             bail!("hyprctl `{cmd}` failed: {}", r.trim());
         }
         Ok(())
+    }
+
+    /// Apply monitor rules with whichever config parser this Hyprland uses
+    /// (0.55+ with a Lua config rejects `keyword` and needs `eval`).
+    fn apply_rules(&self, rules: &[MonitorRule]) -> Result<()> {
+        if rules.is_empty() {
+            return Ok(());
+        }
+        if self.parser.load(Ordering::Relaxed) != 2 {
+            let cmd = if rules.len() == 1 {
+                rules[0].legacy()
+            } else {
+                format!("[[BATCH]]{}", rules.iter().map(MonitorRule::legacy).collect::<Vec<_>>().join(";"))
+            };
+            match self.command_ok(&cmd) {
+                Ok(()) => {
+                    self.parser.store(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(e) if e.to_string().contains("non-legacy") => {
+                    tracing::info!("Hyprland uses the Lua config parser; switching to `eval`");
+                    self.parser.store(2, Ordering::Relaxed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let code = rules.iter().map(MonitorRule::lua).collect::<Vec<_>>().join("\n");
+        self.command_ok(&format!("eval {code}"))
     }
 
     fn raw_monitors(&self) -> Result<Vec<HMonitor>> {
@@ -108,7 +175,13 @@ impl Compositor for Hyprland {
 
     fn create_output(&self, name: &str, width: u32, height: u32, hz: u32) -> Result<String> {
         // Rule first, so the output comes up with the right mode.
-        self.command_ok(&format!("keyword monitor {name},{width}x{height}@{hz},auto,1"))?;
+        self.apply_rules(&[MonitorRule {
+            name: name.into(),
+            mode: format!("{width}x{height}@{hz}"),
+            position: "auto".into(),
+            scale: "1".into(),
+            transform: 0,
+        }])?;
         self.command_ok(&format!("output create headless {name}"))?;
         let m = super::wait_for_output(self, name)?;
         Ok(m.name)
@@ -125,28 +198,26 @@ impl Compositor for Hyprland {
             .find(|m| m.name == name)
             .map(|m| format!("{}x{}", m.x, m.y))
             .unwrap_or_else(|| "auto".into());
-        self.command_ok(&format!("keyword monitor {name},{width}x{height}@{hz},{pos},1"))
+        self.apply_rules(&[MonitorRule { name: name.into(), mode: format!("{width}x{height}@{hz}"), position: pos, scale: "1".into(), transform: 0 }])
     }
 
     fn set_positions(&self, positions: &[(String, i32, i32)]) -> Result<()> {
         let mons = self.raw_monitors()?;
-        let mut cmds = Vec::new();
+        let mut rules = Vec::new();
         for (name, x, y) in positions {
             let Some(m) = mons.iter().find(|m| &m.name == name) else { continue };
             if (m.x, m.y) == (*x, *y) {
                 continue;
             }
-            let mut rule =
-                format!("keyword monitor {name},{}x{}@{:.3},{x}x{y},{}", m.width, m.height, m.refresh_rate, Self::fmt_scale(m.scale));
-            if m.transform != 0 {
-                rule.push_str(&format!(",transform,{}", m.transform));
-            }
-            cmds.push(rule);
+            rules.push(MonitorRule {
+                name: name.clone(),
+                mode: format!("{}x{}@{:.3}", m.width, m.height, m.refresh_rate),
+                position: format!("{x}x{y}"),
+                scale: Self::fmt_scale(m.scale),
+                transform: m.transform,
+            });
         }
-        if cmds.is_empty() {
-            return Ok(());
-        }
-        self.command_ok(&format!("[[BATCH]]{}", cmds.join(";")))
+        self.apply_rules(&rules)
     }
 
     fn cursor_pos(&self) -> Result<Option<(f64, f64)>> {
