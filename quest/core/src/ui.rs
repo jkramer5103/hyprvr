@@ -40,6 +40,8 @@ pub enum Action {
     EnvPage(i32),
     /// Back from the picker to the main menu.
     EnvBack,
+    /// Turn the current environment by 90°.
+    EnvRotate,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,6 +227,11 @@ pub fn env_picker(envs: &[String], current: &Environment, passthrough: bool, pag
         widgets.push(Widget { x: nav_x + nav_w + 98.0, y: by, w: nav_w, h: bh, kind: Kind::Button { label: "›".into(), active: false }, action: (page + 1 < pages).then_some(Action::EnvPage(1)) });
     }
     widgets.push(Widget { x: back_x, y: 14.0, w: back_w, h: HEADER_H - 28.0, kind: Kind::Button { label: "Back".into(), active: false }, action: Some(Action::EnvBack) });
+    if matches!(current, Environment::Image(_)) {
+        let rw = 200.0;
+        // First, so it wins the hit test over the drag handle underneath.
+        widgets.insert(0, Widget { x: 330.0, y: 14.0, w: rw, h: HEADER_H - 28.0, kind: Kind::Button { label: "Rotate 90°".into(), active: false }, action: Some(Action::EnvRotate) });
+    }
 
     let cw = (w - MARGIN * 2.0 - GAP * (PICKER_COLS as f32 - 1.0)) / PICKER_COLS as f32;
     let ch = (cw - 16.0) / 2.0 + 16.0 + 46.0;
@@ -668,6 +675,8 @@ mod tests {
         assert_eq!(cards[0].action, Some(Action::EnvPick(Environment::Passthrough)));
         assert!(matches!(cards[5].kind, Kind::EnvCard { active: true, .. }));
         assert!(p.h <= 760, "picker must fit the menu surface: {}", p.h);
+        let rot = p.widgets.iter().find(|w| w.action == Some(Action::EnvRotate)).unwrap();
+        assert_eq!(p.hit(rot.x + 5.0, rot.y + 5.0).unwrap().0, Action::EnvRotate);
         for w in &p.widgets {
             assert!(w.x >= 0.0 && w.x + w.w <= p.w as f32 && w.y + w.h <= p.h as f32, "{w:?}");
         }

@@ -1265,6 +1265,16 @@ impl App {
                 }
             }
             Action::EnvBack => self.env_picker = None,
+            Action::EnvRotate => {
+                if let Environment::Image(name) = &self.settings.environment {
+                    let y = self.settings.env_yaw.entry(name.clone()).or_insert(0);
+                    *y = (*y + 90) % 360;
+                    if *y == 0 {
+                        self.settings.env_yaw.remove(name);
+                    }
+                    self.push_settings();
+                }
+            }
             Action::EnvPick(e) => {
                 self.settings.environment = e;
                 if let Environment::Image(name) = &self.settings.environment
@@ -1680,7 +1690,12 @@ impl App {
                     EnvMode::Passthrough => self.gfx.clear([0.0, 0.0, 0.0, self.settings.dim.clamp(0.0, 1.0)]),
                     EnvMode::Void => self.gfx.clear(VOID_COLOR),
                     EnvMode::Image => {
-                        let inv = (proj * Mat4::from_quat(vr.inverse())).inverse();
+                        let yaw = match &self.settings.environment {
+                            Environment::Image(n) => self.settings.env_yaw.get(n).copied().unwrap_or(0),
+                            _ => 0,
+                        };
+                        let turn = Mat4::from_rotation_y((yaw as f32).to_radians());
+                        let inv = turn * (proj * Mat4::from_quat(vr.inverse())).inverse();
                         let t = self.env.image.as_ref().map(|(_, t)| *t);
                         self.gfx.draw_env(&inv, t, [0.0; 4]);
                     }

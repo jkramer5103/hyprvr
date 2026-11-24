@@ -95,11 +95,14 @@ pub struct Settings {
     /// and clicks, so sweeping a hand across windows doesn't hover/highlight them.
     #[serde(default)]
     pub laser_hover: bool,
+    /// Per-environment yaw in degrees (multiples of 90), so its "front" faces the user's desk.
+    #[serde(default)]
+    pub env_yaw: std::collections::BTreeMap<String, u16>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { environment: Environment::Passthrough, dim: 0.3, keyboard_cutout: None, show_stats: false, laser_hover: false }
+        Settings { environment: Environment::Passthrough, dim: 0.3, keyboard_cutout: None, show_stats: false, laser_hover: false, env_yaw: Default::default() }
     }
 }
 
