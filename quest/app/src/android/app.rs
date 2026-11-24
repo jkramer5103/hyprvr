@@ -12,8 +12,9 @@ use glow::HasContext;
 use hyprvr_proto::msg::{
     AudioTarget, ClientMsg, ClientStats, Curvature, Environment, PanelLayout, PointerButton, Rect, ScreenId, ServerState, Settings,
 };
-use hyprvr_quest_core::geom::{PanelGeom, Ray, face_toward, hit_rect};
+use hyprvr_quest_core::geom::{PanelGeom, Ray, hit_rect};
 use hyprvr_quest_core::layout::{self, Grab, Head};
+use hyprvr_quest_core::menu::{self as menu_logic, MenuDrag};
 use hyprvr_quest_core::misc::{self, PointerArbiter};
 use hyprvr_quest_core::ui::{self, Action, Painter, ToolbarState, UiPanel};
 use log::{info, warn};
@@ -251,6 +252,11 @@ pub struct App {
     stats_ui: UiSurface,
     toolbar_visible: bool,
     ui_pose: Option<(Vec3, Quat)>,
+    /// Menu being dragged by its handle.
+    menu_drag: Option<MenuDrag>,
+    /// Left palm currently faces the user (pinch toggles the menu).
+    palm_armed: bool,
+    last_menu_toggle: Option<Instant>,
     head: (Vec3, Quat),
     kb_setup: Option<Vec<Vec3>>,
     dim_dragging: bool,
@@ -330,6 +336,9 @@ impl App {
             stats_ui,
             toolbar_visible: true,
             ui_pose: None,
+            menu_drag: None,
+            palm_armed: false,
+            last_menu_toggle: None,
             head: (Vec3::new(0.0, 1.6, 0.0), Quat::IDENTITY),
             kb_setup: None,
             dim_dragging: false,
@@ -422,6 +431,9 @@ impl App {
             NetEvent::Connected { server } => {
                 info!("connected to {server}");
                 self.conn = Conn::Connected { server };
+                // The menu starts hidden once connected; left palm pinch / menu button opens it.
+                self.toolbar_visible = false;
+                self.menu_drag = None;
                 self.ui_pose = None;
             }
             NetEvent::Disconnected(reason) => {
@@ -688,10 +700,28 @@ impl App {
 
     fn summon_ui(&mut self) {
         let (hp, hr) = self.head;
-        let fwd = hr * Vec3::NEG_Z;
-        let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z);
-        let pos = hp + flat * 0.65 + Vec3::new(0.0, -0.28, 0.0);
-        self.ui_pose = Some((pos, face_toward(pos, hp)));
+        self.ui_pose = Some(menu_logic::default_menu_pose(hp, hr));
+    }
+
+    /// Show/hide the main menu. Reopening keeps the place it was dragged to if that is still
+    /// in front of the user, otherwise it comes back in front, below eye level.
+    fn toggle_menu(&mut self) {
+        if self.last_menu_toggle.is_some_and(|t| t.elapsed().as_millis() < 400) {
+            return; // the system menu gesture and our palm pinch may both fire
+        }
+        self.last_menu_toggle = Some(Instant::now());
+        if self.toolbar_visible {
+            self.toolbar_visible = false;
+            self.menu_drag = None;
+            info!("menu hidden");
+        } else {
+            self.toolbar_visible = true;
+            let (hp, hr) = self.head;
+            if !self.ui_pose.is_some_and(|(p, _)| menu_logic::menu_pose_reusable(p, hp, hr)) {
+                self.summon_ui();
+            }
+            info!("menu shown");
+        }
     }
 
     /// Hit test the whole scene along a ray: nearest of main UI, chromes and panels.
@@ -760,20 +790,42 @@ impl App {
             let target = if inp.active { self.hit_scene(&ray) } else { None };
             self.hands[i].target = target.clone();
 
-            if menu_edge == Some(true) {
-                if self.toolbar_visible && self.ui_pose.is_some() {
-                    self.toolbar_visible = false;
-                } else {
-                    self.toolbar_visible = true;
-                    self.summon_ui();
+            if menu_edge == Some(true) && matches!(self.conn, Conn::Connected { .. }) {
+                self.toggle_menu();
+            }
+            // Left palm turned toward the face + pinch toggles the menu (hands only).
+            if i == 0 {
+                let armed = inp.is_hand
+                    && inp.grip_valid
+                    && matches!(self.conn, Conn::Connected { .. })
+                    && menu_logic::palm_facing_head(inp.grip_pos, inp.grip_rot, true, self.head.0);
+                self.palm_armed = armed;
+                if armed {
+                    if sel_edge == Some(true) {
+                        self.toggle_menu();
+                        self.hands[i].select_press = Some(Press::Nothing);
+                    }
+                    self.hands[i].target = None;
+                    continue;
                 }
             }
             if sel_edge == Some(true) || sq_edge == Some(true) {
                 self.primary = i;
             }
 
+            // Squeeze on the menu drags it.
+            if sq_edge == Some(true)
+                && self.grab.is_none()
+                && self.menu_drag.is_none()
+                && let Some((Target::Ui { surface: Surface::Main, .. }, t)) = &target
+            {
+                self.start_menu_drag(i, false, *t);
+            }
+            if sq_edge == Some(false) && self.menu_drag.is_some_and(|d| d.hand == i && !d.by_select) {
+                self.menu_drag = None;
+            }
             // Grab with squeeze on a panel or its chrome.
-            if sq_edge == Some(true) && self.grab.is_none() {
+            if sq_edge == Some(true) && self.grab.is_none() && self.menu_drag.is_none() {
                 let screen = match &target {
                     Some((Target::Panel { screen, .. }, _)) => Some(*screen),
                     Some((Target::Ui { surface: Surface::Chrome(id), .. }, _)) => Some(*id),
@@ -860,8 +912,15 @@ impl App {
             }
         }
 
+        if let Some(d) = &mut self.menu_drag {
+            let inp = &self.hands[d.hand].inp;
+            let st = inp.stick;
+            let push = if st.y.abs() > DEADZONE { st.y * PUSH_M_PER_S * dt } else { 0.0 };
+            self.ui_pose = Some(d.update(inp.aim_pos, inp.aim_rot * Vec3::NEG_Z, self.head.0, push));
+        }
+
         // Laser drives the desktop pointer (primary hand only).
-        let pointer_busy = self.grab.is_some() || self.kb_setup.is_some();
+        let pointer_busy = self.grab.is_some() || self.menu_drag.is_some() || self.kb_setup.is_some();
         let hit = match (&self.hands[self.primary].target, pointer_busy) {
             (Some((Target::Panel { screen, x, y }, _)), false) => Some((*screen, *x, *y)),
             _ => None,
@@ -906,6 +965,11 @@ impl App {
                     self.start_grab(hand, id, true);
                     Press::Grab
                 }
+                Some((Action::MenuDrag, _, _)) => {
+                    let t = self.hands[hand].target.as_ref().map_or(0.5, |(_, t)| *t);
+                    self.start_menu_drag(hand, true, t);
+                    Press::Grab
+                }
                 Some((a, _, _)) => {
                     self.do_action(a);
                     Press::Ui
@@ -929,9 +993,18 @@ impl App {
                 if self.grab.as_ref().is_some_and(|g| g.hand == hand && g.by_select) {
                     self.end_grab();
                 }
+                if self.menu_drag.is_some_and(|d| d.hand == hand && d.by_select) {
+                    self.menu_drag = None;
+                }
             }
             Press::Ui | Press::Setup | Press::Nothing => {}
         }
+    }
+
+    fn start_menu_drag(&mut self, hand: usize, by_select: bool, hit_t: f32) {
+        let Some((pos, rot)) = self.ui_pose else { return };
+        let inp = &self.hands[hand].inp;
+        self.menu_drag = Some(MenuDrag::start(hand, by_select, inp.aim_pos, inp.aim_rot * Vec3::NEG_Z, hit_t, pos, rot));
     }
 
     fn start_grab(&mut self, hand: usize, screen: ScreenId, by_select: bool) {
@@ -1031,7 +1104,12 @@ impl App {
                 let _ = self.net.cmd.send(NetCmd::ForgetServer);
                 self.conn = Conn::Searching("Forgot the paired PC; searching…".into());
             }
-            Action::PanelGrab(_) => {}
+            Action::PanelGrab(_) | Action::MenuDrag => {}
+            Action::MenuClose => {
+                self.toolbar_visible = false;
+                self.menu_drag = None;
+                self.last_menu_toggle = Some(Instant::now());
+            }
             Action::PanelCurve(id) => {
                 let hp = self.head.0;
                 if let Some(p) = self.layout.iter_mut().find(|p| p.screen == id) {
@@ -1384,6 +1462,14 @@ impl App {
         let mut verts: Vec<Vertex> = Vec::new();
         for (i, h) in self.hands.iter().enumerate() {
             if !h.inp.active {
+                continue;
+            }
+            if i == 0 && self.palm_armed {
+                // Gesture ready: a dot above the palm instead of the laser.
+                let n = menu_logic::palm_normal(h.inp.grip_rot, true);
+                let c = h.inp.grip_pos + n * 0.06;
+                let col = if h.select { [0.35, 0.6, 1.0, 1.0] } else { [0.6, 0.75, 1.0, 0.7] };
+                push_disc(&mut verts, c, eye, 0.014, col);
                 continue;
             }
             let dir = h.inp.aim_rot * Vec3::NEG_Z;

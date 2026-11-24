@@ -259,6 +259,12 @@ pub struct HandInput {
     pub stick: Vec2,
     pub alt: bool,
     pub menu: bool,
+    /// Grip (palm) pose; +X of the grip points out of the left palm / into the right palm.
+    pub grip_valid: bool,
+    pub grip_pos: Vec3,
+    pub grip_rot: Quat,
+    /// Tracked hand (not a controller).
+    pub is_hand: bool,
 }
 
 pub struct Input {
@@ -269,8 +275,11 @@ pub struct Input {
     stick: xr::Action<xr::Vector2f>,
     alt: xr::Action<bool>,
     menu: xr::Action<bool>,
+    grip: xr::Action<xr::Posef>,
     hands: [xr::Path; 2],
     aim_spaces: [xr::Space; 2],
+    grip_spaces: [xr::Space; 2],
+    hand_profile: xr::Path,
 }
 
 impl Input {
@@ -284,6 +293,7 @@ impl Input {
         let stick = set.create_action::<xr::Vector2f>("stick", "Thumbstick", &hands)?;
         let alt = set.create_action::<bool>("alt", "Right click", &hands)?;
         let menu = set.create_action::<bool>("menu", "Menu", &hands)?;
+        let grip = set.create_action::<xr::Posef>("grip", "Grip", &hands)?;
         let p = |s: &str| inst.string_to_path(s);
 
         let touch = vec![
@@ -298,6 +308,8 @@ impl Input {
             xr::Binding::new(&alt, p("/user/hand/left/input/y/click")?),
             xr::Binding::new(&alt, p("/user/hand/right/input/b/click")?),
             xr::Binding::new(&menu, p("/user/hand/left/input/menu/click")?),
+            xr::Binding::new(&grip, p("/user/hand/left/input/grip/pose")?),
+            xr::Binding::new(&grip, p("/user/hand/right/input/grip/pose")?),
         ];
         inst.suggest_interaction_profile_bindings(p("/interaction_profiles/oculus/touch_controller")?, &touch)
             .context("touch bindings")?;
@@ -322,10 +334,23 @@ impl Input {
                 xr::Binding::new(&select, p("/user/hand/right/input/pinch_ext/value")?),
                 xr::Binding::new(&squeeze, p("/user/hand/left/input/grasp_ext/value")?),
                 xr::Binding::new(&squeeze, p("/user/hand/right/input/grasp_ext/value")?),
+                xr::Binding::new(&grip, p("/user/hand/left/input/grip/pose")?),
+                xr::Binding::new(&grip, p("/user/hand/right/input/grip/pose")?),
             ];
-            match inst.suggest_interaction_profile_bindings(p("/interaction_profiles/ext/hand_interaction_ext")?, &hand) {
-                Ok(()) => info!("hand interaction bindings suggested"),
-                Err(e) => warn!("hand interaction bindings: {e}"),
+            let profile = p("/interaction_profiles/ext/hand_interaction_ext")?;
+            // Meta may route its left-hand system "menu" gesture here; not part of the EXT spec,
+            // so fall back to the spec bindings if the runtime rejects the path.
+            let mut with_menu = hand.clone();
+            with_menu.push(xr::Binding::new(&menu, p("/user/hand/left/input/menu/click")?));
+            match inst.suggest_interaction_profile_bindings(profile, &with_menu) {
+                Ok(()) => info!("hand interaction bindings suggested (with menu)"),
+                Err(e) => {
+                    info!("hand interaction: menu binding rejected ({e}); using spec bindings");
+                    match inst.suggest_interaction_profile_bindings(profile, &hand) {
+                        Ok(()) => info!("hand interaction bindings suggested"),
+                        Err(e) => warn!("hand interaction bindings: {e}"),
+                    }
+                }
             }
         }
 
@@ -334,7 +359,12 @@ impl Input {
             aim.create_space(session, hands[0], xr::Posef::IDENTITY)?,
             aim.create_space(session, hands[1], xr::Posef::IDENTITY)?,
         ];
-        Ok(Input { set, aim, select, squeeze, stick, alt, menu, hands, aim_spaces })
+        let grip_spaces = [
+            grip.create_space(session, hands[0], xr::Posef::IDENTITY)?,
+            grip.create_space(session, hands[1], xr::Posef::IDENTITY)?,
+        ];
+        let hand_profile = p("/interaction_profiles/ext/hand_interaction_ext")?;
+        Ok(Input { set, aim, select, squeeze, stick, alt, menu, grip, hands, aim_spaces, grip_spaces, hand_profile })
     }
 
     pub fn poll(&self, session: &Session, world: &xr::Space, time: xr::Time) -> [HandInput; 2] {
@@ -361,6 +391,17 @@ impl Input {
             h.stick = self.stick.state(session, path).map(|s| Vec2::new(s.current_state.x, s.current_state.y)).unwrap_or_default();
             h.alt = self.alt.state(session, path).map(|s| s.current_state).unwrap_or(false);
             h.menu = self.menu.state(session, path).map(|s| s.current_state).unwrap_or(false);
+            if self.grip.is_active(session, path).unwrap_or(false)
+                && let Ok(loc) = self.grip_spaces[i].locate(world, time)
+            {
+                let f = loc.location_flags;
+                if f.contains(xr::SpaceLocationFlags::POSITION_VALID) && f.contains(xr::SpaceLocationFlags::ORIENTATION_VALID) {
+                    h.grip_valid = true;
+                    h.grip_pos = to_vec3(loc.pose.position);
+                    h.grip_rot = to_quat(loc.pose.orientation);
+                }
+            }
+            h.is_hand = session.current_interaction_profile(path).map(|p| p == self.hand_profile).unwrap_or(false);
         }
         out
     }

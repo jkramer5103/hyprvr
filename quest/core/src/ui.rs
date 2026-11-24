@@ -27,6 +27,10 @@ pub enum Action {
     PanelGrab(ScreenId),
     PanelCurve(ScreenId),
     PanelClose(ScreenId),
+    /// Drag handle of the main menu.
+    MenuDrag,
+    /// Hide the main menu (bring it back with a left palm pinch or the menu button).
+    MenuClose,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,13 +96,33 @@ pub struct ToolbarState {
 
 const BTN_H: f32 = 84.0;
 const PAD: f32 = 14.0;
+const HEADER_H: f32 = 60.0;
 
 pub fn toolbar(s: &ToolbarState) -> UiPanel {
     let info_h = if s.info.is_empty() { 0.0 } else { s.info.len() as f32 * 34.0 + PAD };
     let w = 1400u32;
-    let h = (BTN_H * 2.0 + PAD * 3.0 + info_h) as u32;
+    let h = (HEADER_H + BTN_H * 2.0 + PAD * 3.0 + info_h) as u32;
     let mut widgets = Vec::new();
-    let mut y = PAD;
+    // Header: drag handle across the width + close button.
+    let close_w = 150.0;
+    widgets.push(Widget { x: 0.0, y: 0.0, w: w as f32 - close_w - PAD, h: HEADER_H, kind: Kind::Handle, action: Some(Action::MenuDrag) });
+    widgets.push(Widget {
+        x: PAD * 3.0,
+        y: 12.0,
+        w: 700.0,
+        h: 36.0,
+        kind: Kind::Text { text: "hyprvr  ·  drag to move  ·  left palm pinch to toggle".into(), size: 24.0 },
+        action: None,
+    });
+    widgets.push(Widget {
+        x: w as f32 - close_w - PAD,
+        y: 4.0,
+        w: close_w,
+        h: HEADER_H - 8.0,
+        kind: Kind::Button { label: "Hide".into(), active: false },
+        action: Some(Action::MenuClose),
+    });
+    let mut y = HEADER_H + PAD;
     for line in &s.info {
         widgets.push(Widget { x: PAD * 2.0, y, w: w as f32 - PAD * 4.0, h: 32.0, kind: Kind::Text { text: line.clone(), size: 26.0 }, action: None });
         y += 34.0;
@@ -377,7 +401,11 @@ mod tests {
         let p = toolbar(&s);
         let w0 = &p.widgets[0];
         let (a, _, _) = p.hit(w0.x + 5.0, w0.y + 5.0).unwrap();
-        assert_eq!(a, Action::AddScreen);
+        assert_eq!(a, Action::MenuDrag);
+        let add = p.widgets.iter().find(|w| w.action == Some(Action::AddScreen)).unwrap();
+        assert_eq!(p.hit(add.x + 5.0, add.y + 5.0).unwrap().0, Action::AddScreen);
+        let hide = p.widgets.iter().find(|w| w.action == Some(Action::MenuClose)).unwrap();
+        assert_eq!(p.hit(hide.x + 5.0, hide.y + 5.0).unwrap().0, Action::MenuClose);
         let slider = p.widgets.iter().find(|w| matches!(w.kind, Kind::Slider { .. })).unwrap();
         let (a, v, _) = p.hit(slider.x + slider.w - 1.0, slider.y + 10.0).unwrap();
         assert_eq!(a, Action::Dim);
