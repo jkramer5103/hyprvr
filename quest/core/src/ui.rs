@@ -38,8 +38,13 @@ pub enum Action {
 pub enum Kind {
     Button { label: String, active: bool },
     Slider { label: String, value: f32 },
+    /// Drag area; draws a grip icon at its left edge.
     Handle,
     Text { text: String, size: f32 },
+    /// Dimmer secondary text.
+    Muted { text: String, size: f32 },
+    /// Button with a small caption above a larger value.
+    Tile { caption: String, value: String, active: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,81 +101,84 @@ pub struct ToolbarState {
     pub info: Vec<String>,
 }
 
-const BTN_H: f32 = 84.0;
 const PAD: f32 = 14.0;
-const HEADER_H: f32 = 60.0;
+const HEADER_H: f32 = 76.0;
+const TILE_H: f32 = 112.0;
+const GAP: f32 = 16.0;
+const MARGIN: f32 = 22.0;
+
+/// "the_sky_is_on_fire.jpg" -> "The sky is on fire".
+pub fn pretty_name(n: &str) -> String {
+    let stem = n.rsplit_once('.').map_or(n, |(a, b)| if b.len() <= 4 { a } else { n });
+    let t = stem.replace(['_', '-'], " ");
+    let mut c = t.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => t,
+    }
+}
 
 pub fn toolbar(s: &ToolbarState) -> UiPanel {
-    let info_h = if s.info.is_empty() { 0.0 } else { s.info.len() as f32 * 34.0 + PAD };
-    let w = 1400u32;
-    let h = (HEADER_H + BTN_H * 2.0 + PAD * 3.0 + info_h) as u32;
+    let w = 1400.0f32;
     let mut widgets = Vec::new();
-    // Header: drag handle across the width + close button.
-    let close_w = 150.0;
-    widgets.push(Widget { x: 0.0, y: 0.0, w: w as f32 - close_w - PAD, h: HEADER_H, kind: Kind::Handle, action: Some(Action::MenuDrag) });
+
+    // Header: grip + title + status on the left (all of it drags), Hide on the right.
+    let hide_w = 140.0;
+    widgets.push(Widget { x: 0.0, y: 0.0, w: w - hide_w - MARGIN * 2.0, h: HEADER_H, kind: Kind::Handle, action: Some(Action::MenuDrag) });
+    widgets.push(Widget { x: 64.0, y: 0.0, w: 160.0, h: HEADER_H, kind: Kind::Text { text: "hyprvr".into(), size: 34.0 }, action: None });
+    if let Some(status) = s.info.first() {
+        widgets.push(Widget { x: 200.0, y: 0.0, w: w - 200.0 - hide_w - MARGIN * 3.0, h: HEADER_H, kind: Kind::Muted { text: status.clone(), size: 24.0 }, action: None });
+    }
     widgets.push(Widget {
-        x: PAD * 3.0,
-        y: 12.0,
-        w: 700.0,
-        h: 36.0,
-        kind: Kind::Text { text: "hyprvr  ·  drag to move  ·  left palm pinch to toggle".into(), size: 24.0 },
-        action: None,
-    });
-    widgets.push(Widget {
-        x: w as f32 - close_w - PAD,
-        y: 4.0,
-        w: close_w,
-        h: HEADER_H - 8.0,
+        x: w - hide_w - MARGIN,
+        y: 14.0,
+        w: hide_w,
+        h: HEADER_H - 28.0,
         kind: Kind::Button { label: "Hide".into(), active: false },
         action: Some(Action::MenuClose),
     });
-    let mut y = HEADER_H + PAD;
-    for line in &s.info {
-        widgets.push(Widget { x: PAD * 2.0, y, w: w as f32 - PAD * 4.0, h: 32.0, kind: Kind::Text { text: line.clone(), size: 26.0 }, action: None });
+    let mut y = HEADER_H + 4.0;
+    for line in s.info.iter().skip(1) {
+        widgets.push(Widget { x: MARGIN, y, w: w - MARGIN * 2.0, h: 32.0, kind: Kind::Muted { text: line.clone(), size: 22.0 }, action: None });
         y += 34.0;
     }
-    if !s.info.is_empty() {
-        y += PAD;
-    }
-    let row1: Vec<(String, bool, Action)> = vec![
-        ("+ Screen".into(), false, Action::AddScreen),
-        (if s.audio_headset { "Audio: Headset" } else { "Audio: Laptop" }.into(), s.audio_headset, Action::ToggleAudio),
-        (format!("Env: {}", s.env_name), false, Action::NextEnv),
-        ("Recenter".into(), false, Action::Recenter),
-    ];
-    let row1: Vec<_> = row1.into_iter().filter(|r| s.can_add || r.2 != Action::AddScreen).collect();
-    layout_row(&mut widgets, &row1, y, w as f32);
-    y += BTN_H + PAD;
-    // Second row: dim slider + keyboard + stats.
-    let slider_w = 480.0;
-    widgets.push(Widget { x: PAD, y, w: slider_w, h: BTN_H, kind: Kind::Slider { label: "Dim".into(), value: s.dim }, action: Some(Action::Dim) });
-    let mut row2: Vec<(String, bool, Action)> = vec![("Keyboard: set up".into(), false, Action::KeyboardSetup)];
-    if s.cutout_exists {
-        row2.push((if s.cutout_on { "Keyboard: on" } else { "Keyboard: off" }.into(), s.cutout_on, Action::KeyboardToggle));
-    }
-    row2.push((if s.hover_on { "Hover: on" } else { "Hover: off" }.into(), s.hover_on, Action::ToggleHover));
-    row2.push(("Stats".into(), s.stats_on, Action::ToggleStats));
-    let x0 = PAD * 2.0 + slider_w;
-    let bw = (w as f32 - x0 - PAD * row2.len() as f32) / row2.len() as f32;
-    for (i, (label, active, action)) in row2.into_iter().enumerate() {
-        widgets.push(Widget { x: x0 + i as f32 * (bw + PAD), y, w: bw, h: BTN_H, kind: Kind::Button { label, active }, action: Some(action) });
-    }
-    UiPanel { w, h, widgets }
-}
 
-fn layout_row(widgets: &mut Vec<Widget>, items: &[(String, bool, Action)], y: f32, w: f32) {
-    let n = items.len().max(1) as f32;
-    let bw = (w - PAD * (n + 1.0)) / n;
-    for (i, (label, active, action)) in items.iter().enumerate() {
-        widgets.push(Widget {
-            x: PAD + i as f32 * (bw + PAD),
-            y,
-            w: bw,
-            h: BTN_H,
-            kind: Kind::Button { label: label.clone(), active: *active },
-            action: Some(action.clone()),
-        });
+    let tile = |caption: &str, value: String, active: bool, action: Action| (caption.to_string(), value, active, action);
+    let mut tiles = Vec::new();
+    if s.can_add {
+        tiles.push(tile("Screens", "+ Add".into(), false, Action::AddScreen));
     }
+    tiles.push(tile("Layout", "Recenter".into(), false, Action::Recenter));
+    tiles.push(tile("Audio", if s.audio_headset { "Headset" } else { "Laptop" }.into(), s.audio_headset, Action::ToggleAudio));
+    tiles.push(tile("Environment", pretty_name(&s.env_name), false, Action::NextEnv));
+    // Slot for the dim slider.
+    let slider_slot = tiles.len();
+    tiles.push(tile("", String::new(), false, Action::Dim));
+    tiles.push(tile("Laser hover", if s.hover_on { "On" } else { "Off" }.into(), s.hover_on, Action::ToggleHover));
+    if s.cutout_exists {
+        tiles.push(tile("Keyboard", if s.cutout_on { "Shown" } else { "Hidden" }.into(), s.cutout_on, Action::KeyboardToggle));
+        tiles.push(tile("Keyboard", "Redo setup".into(), false, Action::KeyboardSetup));
+    } else {
+        tiles.push(tile("Keyboard", "Set up".into(), false, Action::KeyboardSetup));
+    }
+    tiles.push(tile("Stats", if s.stats_on { "On" } else { "Off" }.into(), s.stats_on, Action::ToggleStats));
+
+    let cols = if tiles.len() > 8 { 5 } else { 4 };
+    let tw = (w - MARGIN * 2.0 - GAP * (cols as f32 - 1.0)) / cols as f32;
+    y += 6.0;
+    let rows = tiles.len().div_ceil(cols);
+    for (i, (caption, value, active, action)) in tiles.into_iter().enumerate() {
+        let (r, c) = (i / cols, i % cols);
+        let (x, ty) = (MARGIN + c as f32 * (tw + GAP), y + r as f32 * (TILE_H + GAP));
+        let kind = if i == slider_slot {
+            Kind::Slider { label: "Dim".into(), value: s.dim }
+        } else {
+            Kind::Tile { caption, value, active }
+        };
+        widgets.push(Widget { x, y: ty, w: tw, h: TILE_H, kind, action: Some(action) });
+    }
+    let h = y + rows as f32 * (TILE_H + GAP) - GAP + MARGIN;
+    UiPanel { w: w as u32, h: h.ceil() as u32, widgets }
 }
 
 /// Number pad for the pairing PIN.
@@ -227,24 +235,28 @@ pub fn card(lines: &[String]) -> UiPanel {
     UiPanel { w, h: (y + PAD) as u32, widgets }
 }
 
-/// Strip under each panel: grab handle + curve toggle + close.
+/// Strip under each panel: grip + label (drag area), curve toggle, close.
 pub fn panel_chrome(screen: ScreenId, curved: bool, label: &str) -> UiPanel {
-    let (w, h) = (900u32, 70u32);
-    let bw = 150.0;
+    let (w, h) = (900.0f32, 72.0f32);
+    let bw = 132.0;
+    let gap = 10.0;
+    let m = 10.0;
+    let close_x = w - m - bw;
+    let curve_x = close_x - gap - bw;
     let widgets = vec![
-        Widget { x: 0.0, y: 0.0, w: w as f32 - 2.0 * (bw + 10.0), h: h as f32, kind: Kind::Handle, action: Some(Action::PanelGrab(screen)) },
-        Widget { x: 40.0, y: 14.0, w: 300.0, h: 40.0, kind: Kind::Text { text: label.into(), size: 26.0 }, action: None },
+        Widget { x: 0.0, y: 0.0, w: curve_x - gap, h, kind: Kind::Handle, action: Some(Action::PanelGrab(screen)) },
+        Widget { x: 60.0, y: 0.0, w: curve_x - gap - 70.0, h, kind: Kind::Muted { text: label.into(), size: 24.0 }, action: None },
         Widget {
-            x: w as f32 - 2.0 * bw - 10.0,
-            y: 0.0,
+            x: curve_x,
+            y: m,
             w: bw,
-            h: h as f32,
+            h: h - 2.0 * m,
             kind: Kind::Button { label: if curved { "Flat" } else { "Curve" }.into(), active: curved },
             action: Some(Action::PanelCurve(screen)),
         },
-        Widget { x: w as f32 - bw, y: 0.0, w: bw, h: h as f32, kind: Kind::Button { label: "Close".into(), active: false }, action: Some(Action::PanelClose(screen)) },
+        Widget { x: close_x, y: m, w: bw, h: h - 2.0 * m, kind: Kind::Button { label: "Close".into(), active: false }, action: Some(Action::PanelClose(screen)) },
     ];
-    UiPanel { w, h, widgets }
+    UiPanel { w: w as u32, h: h as u32, widgets }
 }
 
 // ---------------------------------------------------------------- rendering
@@ -268,6 +280,7 @@ const BTN: Rgba = [0.20, 0.22, 0.30, 1.0];
 const BTN_ACTIVE: Rgba = [0.27, 0.42, 0.75, 1.0];
 const BTN_HOVER_ADD: f32 = 0.12;
 const TEXT: Rgba = [0.92, 0.93, 0.96, 1.0];
+const MUTED: Rgba = [0.60, 0.63, 0.72, 1.0];
 
 impl Painter {
     pub fn new() -> Self {
@@ -288,33 +301,84 @@ impl Painter {
                         c = [c[0] + BTN_HOVER_ADD, c[1] + BTN_HOVER_ADD, c[2] + BTN_HOVER_ADD, 1.0];
                     }
                     img.round_rect(w.x, w.y, w.w, w.h, 12.0, c);
-                    let size = (w.h * 0.36).clamp(18.0, 40.0);
-                    self.text(&mut img, label, w.x + w.w / 2.0, w.y + w.h / 2.0, size, TEXT, true, w.w - 16.0);
+                    let size = (w.h * 0.42).clamp(22.0, 34.0);
+                    self.text(&mut img, label, w.x + w.w / 2.0, w.y + w.h / 2.0, size, TEXT, true, w.w - 24.0);
+                }
+                Kind::Tile { caption, value, active } => {
+                    let mut c = if *active { BTN_ACTIVE } else { BTN };
+                    if hov {
+                        c = [c[0] + BTN_HOVER_ADD, c[1] + BTN_HOVER_ADD, c[2] + BTN_HOVER_ADD, 1.0];
+                    }
+                    img.round_rect(w.x, w.y, w.w, w.h, 14.0, c);
+                    let muted = if *active { [0.85, 0.9, 1.0, 1.0] } else { MUTED };
+                    self.text(&mut img, caption, w.x + 20.0, w.y + w.h * 0.30, 22.0, muted, false, w.w - 40.0);
+                    self.text(&mut img, value, w.x + 20.0, w.y + w.h * 0.66, 32.0, TEXT, false, w.w - 40.0);
                 }
                 Kind::Slider { label, value } => {
-                    img.round_rect(w.x, w.y, w.w, w.h, 12.0, if hov { [0.26, 0.28, 0.36, 1.0] } else { BTN });
-                    let fill = 12.0 + (w.w - 24.0) * value.clamp(0.0, 1.0);
-                    img.round_rect(w.x + 6.0, w.y + w.h - 22.0, w.w - 12.0, 10.0, 5.0, [0.1, 0.1, 0.12, 1.0]);
-                    img.round_rect(w.x + 6.0, w.y + w.h - 22.0, fill, 10.0, 5.0, BTN_ACTIVE);
-                    img.round_rect(w.x + fill - 2.0, w.y + w.h - 32.0, 16.0, 30.0, 6.0, TEXT);
-                    let t = format!("{label} {:.0}%", value * 100.0);
-                    self.text(&mut img, &t, w.x + w.w / 2.0, w.y + w.h * 0.35, 28.0, TEXT, true, w.w);
+                    img.round_rect(w.x, w.y, w.w, w.h, 14.0, if hov { [0.26, 0.28, 0.36, 1.0] } else { BTN });
+                    // Track inset by 20 px; hit() maps x - 12 .. w - 12 to 0..1, close enough.
+                    let (tx, tw) = (w.x + 20.0, w.w - 40.0);
+                    let ty = w.y + w.h * 0.70;
+                    let v = value.clamp(0.0, 1.0);
+                    img.round_rect(tx, ty - 4.0, tw, 8.0, 4.0, [0.1, 0.1, 0.12, 1.0]);
+                    img.round_rect(tx, ty - 4.0, tw * v, 8.0, 4.0, BTN_ACTIVE);
+                    img.round_rect(tx + tw * v - 11.0, ty - 11.0, 22.0, 22.0, 11.0, TEXT);
+                    self.text(&mut img, label, w.x + 20.0, w.y + w.h * 0.30, 22.0, MUTED, false, w.w - 40.0);
+                    let pct = format!("{:.0}%", v * 100.0);
+                    self.text(&mut img, &pct, w.x + w.w - 20.0 - 60.0, w.y + w.h * 0.30, 22.0, TEXT, false, 60.0);
                 }
                 Kind::Handle => {
-                    let c = if hov { [0.45, 0.5, 0.65, 1.0] } else { [0.3, 0.33, 0.42, 1.0] };
-                    img.round_rect(w.x + w.w * 0.3, w.y + w.h / 2.0 - 7.0, w.w * 0.4, 14.0, 7.0, c);
+                    if hov {
+                        img.round_rect(w.x + 6.0, w.y + 6.0, w.w - 12.0, w.h - 12.0, 12.0, [1.0, 1.0, 1.0, 0.06]);
+                    }
+                    // 2x3 grip dots.
+                    let c = if hov { [0.75, 0.8, 0.95, 1.0] } else { [0.45, 0.48, 0.58, 1.0] };
+                    let cy = w.y + w.h / 2.0;
+                    for (dx, dy) in [(0.0, -12.0), (0.0, 0.0), (0.0, 12.0), (11.0, -12.0), (11.0, 0.0), (11.0, 12.0)] {
+                        img.round_rect(w.x + 26.0 + dx - 3.5, cy + dy - 3.5, 7.0, 7.0, 3.5, c);
+                    }
                 }
                 Kind::Text { text, size } => {
                     self.text(&mut img, text, w.x, w.y + w.h / 2.0, *size, TEXT, false, w.w);
+                }
+                Kind::Muted { text, size } => {
+                    self.text(&mut img, text, w.x, w.y + w.h / 2.0, *size, MUTED, false, w.w);
                 }
             }
         }
         img.px
     }
 
+    fn width(&mut self, s: &str, px: u32) -> f32 {
+        s.chars().map(|c| self.glyph(c, px).0.advance_width).sum()
+    }
+
+    fn glyph(&mut self, c: char, px: u32) -> (fontdue::Metrics, Vec<u8>) {
+        let font = &self.font;
+        self.cache.entry((c, px)).or_insert_with(|| font.rasterize(c, px as f32)).clone()
+    }
+
+    /// Draws `s` within `max_w`: shrinks it (down to 75 %) and then ellipsizes, never overflows.
     #[allow(clippy::too_many_arguments)]
     fn text(&mut self, img: &mut Img, s: &str, x: f32, cy: f32, size: f32, color: Rgba, center: bool, max_w: f32) {
-        let px = size.round() as u32;
+        let mut px = size.round() as u32;
+        let min_px = ((size * 0.75).round() as u32).max(12);
+        while px > min_px && self.width(s, px) > max_w {
+            px -= 1;
+        }
+        let mut s = s.to_string();
+        if self.width(&s, px) > max_w {
+            while !s.is_empty() && self.width(&format!("{s}…"), px) > max_w {
+                s.pop();
+            }
+            s = format!("{}…", s.trim_end());
+        }
+        self.draw_text(img, &s, x, cy, px, color, center, max_w);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text(&mut self, img: &mut Img, s: &str, x: f32, cy: f32, px: u32, color: Rgba, center: bool, max_w: f32) {
+        let size = px as f32;
         let glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = s
             .chars()
             .map(|c| {
@@ -434,7 +498,48 @@ mod tests {
     fn chrome_actions() {
         let p = panel_chrome(7, false, "HYPRVR-1");
         assert_eq!(p.hit(10.0, 35.0).unwrap().0, Action::PanelGrab(7));
-        assert_eq!(p.hit(899.0, 35.0).unwrap().0, Action::PanelClose(7));
+        assert_eq!(p.hit(880.0, 35.0).unwrap().0, Action::PanelClose(7));
         assert_eq!(p.hit(650.0, 35.0).unwrap().0, Action::PanelCurve(7));
+    }
+
+    #[test]
+    fn tiles_fit_inside_panel_and_dump_previews() {
+        let mut painter = Painter::new();
+        for (name, s) in [
+            ("basic", ToolbarState { dim: 0.67, env_name: "the_sky_is_on_fire.jpg".into(), can_add: true, info: vec!["jk-laptop3  ·  2 screens".into()], ..Default::default() }),
+            ("full", ToolbarState { dim: 0.2, env_name: "Passthrough".into(), can_add: true, cutout_exists: true, cutout_on: true, hover_on: true, stats_on: true, audio_headset: true, info: vec!["jk-laptop3  ·  3 screens".into()] }),
+        ] {
+            let p = toolbar(&s);
+            for w in &p.widgets {
+                assert!(w.x >= 0.0 && w.y >= 0.0 && w.x + w.w <= p.w as f32 && w.y + w.h <= p.h as f32, "{w:?} outside {}x{}", p.w, p.h);
+            }
+            // No two interactive widgets overlap (the drag handle excepted).
+            let act: Vec<_> = p.widgets.iter().filter(|w| w.action.is_some() && w.kind != Kind::Handle).collect();
+            for (i, a) in act.iter().enumerate() {
+                for b in &act[i + 1..] {
+                    let sep = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+                    assert!(sep, "{a:?} overlaps {b:?}");
+                }
+            }
+            if let Ok(dir) = std::env::var("UI_PREVIEW_DIR") {
+                let img = painter.render(&p, Some(5));
+                dump_ppm(&format!("{dir}/toolbar_{name}.ppm"), p.w, p.h, &img);
+                let c = panel_chrome(1, false, "HYPRVR-1  1920x1080");
+                let img = painter.render(&c, None);
+                dump_ppm(&format!("{dir}/chrome.ppm"), c.w, c.h, &img);
+            }
+        }
+    }
+
+    fn dump_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) {
+        // Composite over a mid grey so the translucent background is visible.
+        let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+        for px in rgba.chunks_exact(4) {
+            let a = px[3] as f32 / 255.0;
+            for k in 0..3 {
+                out.push((px[k] as f32 + 90.0 * (1.0 - a)) as u8);
+            }
+        }
+        std::fs::write(path, out).unwrap();
     }
 }
