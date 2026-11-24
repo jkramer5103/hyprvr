@@ -41,8 +41,6 @@ const SELECT_OFF: f32 = 0.4;
 // they part; only a (nearly) closed pinch counts, and opening it a bit releases.
 const HAND_PINCH_ON: f32 = 0.99;
 const HAND_PINCH_OFF: f32 = 0.8;
-const HAND_GRASP_ON: f32 = 0.9;
-const HAND_GRASP_OFF: f32 = 0.6;
 const DEADZONE: f32 = 0.2;
 const SCROLL_NOTCHES_PER_S: f32 = 12.0;
 const PUSH_M_PER_S: f32 = 1.5;
@@ -803,12 +801,14 @@ impl App {
             let h = &mut self.hands[i];
             h.inp = inp;
             let (sel_on, sel_off, sq_on, sq_off) = if inp.is_hand {
-                (HAND_PINCH_ON, HAND_PINCH_OFF, HAND_GRASP_ON, HAND_GRASP_OFF)
+                (HAND_PINCH_ON, HAND_PINCH_OFF, SELECT_ON, SELECT_OFF)
             } else {
                 (SELECT_ON, SELECT_OFF, SELECT_ON, SELECT_OFF)
             };
             let sel = if h.select { inp.select > sel_off } else { inp.select >= sel_on };
-            let sq = if h.squeeze { inp.squeeze > sq_off } else { inp.squeeze >= sq_on };
+            // Hand "grasp" fires on a relaxed/curled hand, so hands never grab by grasping;
+            // with hands, panels move only via their bar (pinch).
+            let sq = !inp.is_hand && if h.squeeze { inp.squeeze > sq_off } else { inp.squeeze >= sq_on };
             let sel_edge = (sel != h.select).then_some(sel);
             let sq_edge = (sq != h.squeeze).then_some(sq);
             let alt_edge = (inp.alt != h.alt).then_some(inp.alt);
