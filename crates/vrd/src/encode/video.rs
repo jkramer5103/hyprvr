@@ -217,7 +217,7 @@ impl VideoEncoder {
             };
             let df: ff::AVPixelFormat = std::mem::transmute((*self.sw_frame).format);
             let (w, h) = (self.width as i32, self.height as i32);
-            self.sws = ff::sws_getContext(w, h, sf, w, h, df, ff::SWS_POINT, ptr::null_mut(), ptr::null_mut(), ptr::null());
+            self.sws = ff::sws_getContext(w, h, sf, w, h, df, SWS_POINT_FLAG, ptr::null_mut(), ptr::null_mut(), ptr::null());
             if self.sws.is_null() {
                 bail!("sws_getContext failed");
             }
@@ -390,3 +390,6 @@ mod tests {
         assert_eq!(first_key, Some(0));
     }
 }
+
+/// `SWS_POINT` (1 << 4). Literal because ffmpeg 8+ moved it into the `SwsFlags` enum.
+const SWS_POINT_FLAG: std::ffi::c_int = 0x10;

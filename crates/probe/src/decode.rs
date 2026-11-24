@@ -75,7 +75,7 @@ impl Decoder {
                         w,
                         h,
                         ff::AVPixelFormat::AV_PIX_FMT_RGBA,
-                        ff::SWS_POINT,
+                        SWS_POINT_FLAG,
                         ptr::null_mut(),
                         ptr::null_mut(),
                         ptr::null(),
@@ -111,3 +111,6 @@ impl Drop for Decoder {
         }
     }
 }
+
+/// `SWS_POINT` (1 << 4). Literal because ffmpeg 8+ moved it into the `SwsFlags` enum.
+const SWS_POINT_FLAG: std::ffi::c_int = 0x10;
