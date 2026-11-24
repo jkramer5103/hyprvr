@@ -4,6 +4,9 @@
 
 /// Hold this long without moving to start a button drag.
 pub const HOLD_S: f32 = 0.35;
+/// Hand travel per wheel notch = panel height / this (a notch scrolls ~3 lines in most apps,
+/// so this is much slower than 1:1 on purpose).
+pub const PX_PER_NOTCH_DIV: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -37,7 +40,7 @@ impl PinchTouch {
     /// `panel_h_px`: panel height in pixels; thresholds scale with it.
     pub fn new(x: f32, y: f32, panel_h_px: u32) -> Self {
         let h = panel_h_px.max(240) as f32;
-        PinchTouch { start: (x, y), last: (x, y), held: 0.0, slop_px: (h * 0.03).max(18.0), px_per_notch: h / 20.0, mode: Mode::Pending }
+        PinchTouch { start: (x, y), last: (x, y), held: 0.0, slop_px: (h * 0.03).max(18.0), px_per_notch: h / PX_PER_NOTCH_DIV, mode: Mode::Pending }
     }
 
     /// `pos`: current hit point on the same panel (None when the ray left it).
@@ -103,8 +106,8 @@ mod tests {
         let mut t = PinchTouch::new(500.0, 500.0, 1080);
         assert_eq!(t.update(Some((500.0, 460.0)), 0.05), Out::None); // past slop: scroll mode
         assert_eq!(t.mode, Mode::Scroll);
-        match t.update(Some((500.0, 352.0)), 0.016) {
-            // Hand moved up 108 px = 2 notches at 54 px/notch => scroll down.
+        match t.update(Some((500.0, 28.0)), 0.016) {
+            // Hand moved up 432 px = 2 notches at 216 px/notch => scroll down.
             Out::Scroll { dx, dy } => {
                 assert!(dx.abs() < 1e-4);
                 assert!((dy - 2.0).abs() < 1e-3, "{dy}");
@@ -112,7 +115,7 @@ mod tests {
             o => panic!("{o:?}"),
         }
         // Scrolling never turns into a press, however long it's held.
-        assert!(matches!(t.update(Some((500.0, 352.0)), 2.0), Out::Scroll { .. }));
+        assert!(matches!(t.update(Some((500.0, 28.0)), 2.0), Out::Scroll { .. }));
         assert!(!t.is_click());
     }
 }

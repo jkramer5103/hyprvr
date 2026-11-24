@@ -17,6 +17,7 @@ use hyprvr_quest_core::layout::{self, Grab, Head};
 use hyprvr_quest_core::layout::{CornerResize, TwoHandScale, resize_handles, ray_point_distance, HANDLE_RADIUS};
 use hyprvr_quest_core::menu::{self as menu_logic, MenuDrag};
 use hyprvr_quest_core::touch::{self, PinchTouch};
+use hyprvr_quest_core::aim::{AimFilter, ClickSlop};
 use hyprvr_quest_core::misc::{self, PointerArbiter};
 use hyprvr_quest_core::ui::{self, Action, Painter, ToolbarState, UiPanel};
 use log::{info, warn};
@@ -177,7 +178,8 @@ enum Target {
 
 #[derive(Clone, Copy, Debug)]
 enum Press {
-    Panel { screen: ScreenId, button: PointerButton, x: f32, y: f32 },
+    /// Button held on a panel; `slop.anchor` is where the button currently is.
+    Panel { screen: ScreenId, button: PointerButton, slop: ClickSlop },
     Slider,
     Ui,
     Grab,
@@ -195,6 +197,9 @@ struct HandState {
     alt: bool,
     menu: bool,
     target: Option<(Target, f32)>,
+    /// Target while the trigger was still at rest (before it tilted the controller).
+    rest_target: Option<(Target, f32)>,
+    filter: AimFilter,
     select_press: Option<Press>,
     alt_press: Option<Press>,
     scroll: Vec2,
@@ -797,8 +802,14 @@ impl App {
     fn handle_input(&mut self, f: &Frame<'_>, dt: f32) {
         let now = self.now_s();
         for i in 0..2 {
-            let inp = f.hands[i];
+            let mut inp = f.hands[i];
             let h = &mut self.hands[i];
+            // Controllers jitter; smooth the aim (hands are already smooth enough).
+            if inp.active && !inp.is_hand {
+                (inp.aim_pos, inp.aim_rot) = h.filter.update(inp.aim_pos, inp.aim_rot, dt);
+            } else {
+                h.filter.reset();
+            }
             h.inp = inp;
             let (sel_on, sel_off, sq_on, sq_off) = if inp.is_hand {
                 (HAND_PINCH_ON, HAND_PINCH_OFF, SELECT_ON, SELECT_OFF)
@@ -820,6 +831,9 @@ impl App {
             let ray = Ray::new(inp.aim_pos, inp.aim_rot * Vec3::NEG_Z);
             let target = if inp.active { self.hit_scene(&ray) } else { None };
             self.hands[i].target = target.clone();
+            if !self.hands[i].select && inp.select < 0.15 {
+                self.hands[i].rest_target = target.clone();
+            }
 
             if menu_edge == Some(true) && matches!(self.conn, Conn::Connected { .. }) {
                 self.toggle_menu();
@@ -912,7 +926,8 @@ impl App {
                     self.primary = i;
                     self.arbiter.on_press();
                     self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Right, pressed: true });
-                    self.hands[i].alt_press = Some(Press::Panel { screen, button: PointerButton::Right, x, y });
+                    let slop = ClickSlop::new(x, y, self.screen_h(screen));
+                    self.hands[i].alt_press = Some(Press::Panel { screen, button: PointerButton::Right, slop });
                 }
             }
             if alt_edge == Some(false)
@@ -941,7 +956,8 @@ impl App {
                         self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Left, pressed: true });
                         let (x, y) = pos.unwrap_or((x, y));
                         // Now a plain held button that follows the ray.
-                        self.hands[i].select_press = Some(Press::Panel { screen, button: PointerButton::Left, x, y });
+                        self.hands[i].select_press =
+                            Some(Press::Panel { screen, button: PointerButton::Left, slop: ClickSlop::moving(x, y) });
                     }
                     touch::Out::Scroll { dx, dy } => {
                         self.hands[i].scroll += Vec2::new(dx, dy);
@@ -951,12 +967,16 @@ impl App {
                 }
             }
 
-            // Track the pressed panel position while held.
-            if let Some(Press::Panel { screen, button, .. }) = self.hands[i].select_press
-                && let Some((Target::Panel { screen: s2, x, y }, _)) = &self.hands[i].target
-                && *s2 == screen
-            {
-                self.hands[i].select_press = Some(Press::Panel { screen, button, x: *x, y: *y });
+            // Track the pressed panel position while held (pinned until it clearly moves).
+            if let Some((Target::Panel { screen: s2, x, y }, _)) = self.hands[i].target.clone() {
+                let h = &mut self.hands[i];
+                for press in [&mut h.select_press, &mut h.alt_press] {
+                    if let Some(Press::Panel { screen, slop, .. }) = press
+                        && *screen == s2
+                    {
+                        slop.update(x, y);
+                    }
+                }
             }
 
             // Thumbstick scroll over a panel (when not grabbing with this hand).
@@ -1020,10 +1040,14 @@ impl App {
         let pointer_busy =
             self.grab.is_some() || self.menu_drag.is_some() || self.corner.is_some() || self.kb_setup.is_some() || touching;
         // Without hover the pointer only follows the laser while a button is held.
-        let pressing = matches!(self.hands[self.primary].select_press, Some(Press::Panel { .. }))
-            || matches!(self.hands[self.primary].alt_press, Some(Press::Panel { .. }));
-        let hit = match (&self.hands[self.primary].target, pointer_busy) {
-            (Some((Target::Panel { screen, x, y }, _)), false) if self.settings.laser_hover || pressing => Some((*screen, *x, *y)),
+        let held = |p: &Option<Press>| match p {
+            Some(Press::Panel { screen, slop, .. }) => Some((*screen, slop.anchor.0, slop.anchor.1)),
+            _ => None,
+        };
+        let pressed = held(&self.hands[self.primary].select_press).or(held(&self.hands[self.primary].alt_press));
+        let hit = match (&self.hands[self.primary].target, pointer_busy, pressed) {
+            (_, false, Some(p)) => Some(p),
+            (Some((Target::Panel { screen, x, y }, _)), false, None) if self.settings.laser_hover => Some((*screen, *x, *y)),
             _ => None,
         };
         if let Some((s, x, y)) = self.arbiter.on_laser(hit, now) {
@@ -1058,14 +1082,24 @@ impl App {
                 // Decided on movement/hold; the pointer stays where the pinch started.
                 self.arbiter.on_press();
                 let _ = self.net.cmd.send(NetCmd::PointerMove { screen: *screen, x: *x, y: *y });
-                let h = self.screens.get(screen).map_or(1080, |s| s.h);
+                let h = self.screen_h(*screen);
                 Press::Touch { screen: *screen, touch: PinchTouch::new(*x, *y, h) }
             }
             Some(Target::Panel { screen, x, y }) => {
+                // Pulling the trigger tilts the controller: click where it pointed at rest.
+                let (x, y) = match &self.hands[hand].rest_target {
+                    Some((Target::Panel { screen: s2, x: rx, y: ry }, _))
+                        if s2 == screen && (rx - x).hypot(ry - y) < self.screen_h(*screen) as f32 * 0.05 =>
+                    {
+                        (*rx, *ry)
+                    }
+                    _ => (*x, *y),
+                };
+                let screen = *screen;
                 self.arbiter.on_press();
-                let _ = self.net.cmd.send(NetCmd::PointerMove { screen: *screen, x: *x, y: *y });
-                self.send(ClientMsg::Button { screen: *screen, x: *x, y: *y, button: PointerButton::Left, pressed: true });
-                Press::Panel { screen: *screen, button: PointerButton::Left, x: *x, y: *y }
+                let _ = self.net.cmd.send(NetCmd::PointerMove { screen, x, y });
+                self.send(ClientMsg::Button { screen, x, y, button: PointerButton::Left, pressed: true });
+                Press::Panel { screen, button: PointerButton::Left, slop: ClickSlop::new(x, y, self.screen_h(screen)) }
             }
             Some(Target::Ui { surface, x, y }) => match self.ui_hit(*surface, *x, *y) {
                 Some((Action::Dim, v, _)) => {
@@ -1092,9 +1126,14 @@ impl App {
         }
     }
 
+    fn screen_h(&self, screen: ScreenId) -> u32 {
+        self.screens.get(&screen).map_or(1080, |s| s.h)
+    }
+
     fn on_release(&mut self, hand: usize, press: Press) {
         match press {
-            Press::Panel { screen, button, x, y } => {
+            Press::Panel { screen, button, slop } => {
+                let (x, y) = slop.anchor;
                 self.send(ClientMsg::Button { screen, x, y, button, pressed: false });
             }
             Press::Slider => {
