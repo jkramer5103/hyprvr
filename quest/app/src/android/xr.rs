@@ -408,12 +408,12 @@ impl Layers {
         }
     }
 
-    pub fn passthrough(&mut self, layer: sys::PassthroughLayerFB, space: &xr::Space) {
+    pub fn passthrough(&mut self, layer: sys::PassthroughLayerFB, _space: &xr::Space) {
         self.items.push(LayerBox::Passthrough(sys::CompositionLayerPassthroughFB {
             ty: sys::CompositionLayerPassthroughFB::TYPE,
             next: ptr::null(),
             flags: sys::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
-            space: space.as_raw(),
+            space: sys::Space::NULL, // runtime rejects a space on passthrough layers
             layer_handle: layer,
         }));
     }
