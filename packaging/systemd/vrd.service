@@ -1,0 +1,17 @@
+[Unit]
+Description=hyprvr VR desktop daemon (Quest 3 streaming)
+Documentation=https://github.com/jkramer5103/hyprvr
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/vrd daemon
+Restart=always
+RestartSec=2
+# The daemon finds the Hyprland/Wayland session itself if these are not imported.
+Environment=VRD_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

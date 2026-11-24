@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/proto"]
+members = ["crates/probe","crates/proto", "crates/vrd"]
 exclude = ["quest"]
 
 [workspace.package]
