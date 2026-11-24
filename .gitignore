@@ -1,0 +1,5 @@
+/target
+/quest/target
+/quest/build
+*.apk
+*.keystore
