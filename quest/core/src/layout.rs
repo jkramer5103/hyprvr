@@ -158,18 +158,31 @@ pub struct Grab {
     /// Panel center in the controller's local frame at grab time.
     local_offset: Vec3,
     pub width_m: f32,
+    /// Controller distance from the head last frame (for amplified push/pull).
+    last_reach: Option<f32>,
 }
+
+/// Extra push/pull per meter of hand motion toward/away from the head, per meter of panel
+/// distance beyond `REACH_GAIN_START`. A panel 2 m away moves ~7x the hand's motion, so one
+/// arm pull brings it close; nearby panels move ~1:1 for fine placement.
+const REACH_GAIN: f32 = 4.0;
+const REACH_GAIN_START: f32 = 0.4;
 
 impl Grab {
     pub fn start(panel: &PanelLayout, ctrl_pos: Vec3, ctrl_rot: Quat) -> Self {
         let (pos, _) = to_glam(&panel.pose);
-        Grab { screen: panel.screen, local_offset: ctrl_rot.inverse() * (pos - ctrl_pos), width_m: panel.width_m }
+        Grab { screen: panel.screen, local_offset: ctrl_rot.inverse() * (pos - ctrl_pos), width_m: panel.width_m, last_reach: None }
     }
 
     /// `push`: meters to move away (+) / toward (-) the controller this frame.
     /// `grow`: relative size change this frame (e.g. 0.01 = +1%).
     pub fn update(&mut self, panel: &mut PanelLayout, ctrl_pos: Vec3, ctrl_rot: Quat, head_pos: Vec3, push: f32, grow: f32) {
         let len = self.local_offset.length();
+        // Hand moving toward/away from the head pulls/pushes the panel extra, more when it is far.
+        let reach = (ctrl_pos - head_pos).length();
+        let reach_delta = self.last_reach.map_or(0.0, |r| reach - r);
+        self.last_reach = Some(reach);
+        let push = push + reach_delta * REACH_GAIN * (len - REACH_GAIN_START).max(0.0);
         if len > 1e-4 {
             let new_len = (len + push).clamp(0.25, 6.0);
             self.local_offset *= new_len / len;
@@ -369,6 +382,29 @@ mod tests {
         assert!(matches!(p.curvature, Curvature::Curved { .. }));
         toggle_curve(&mut p, head().position);
         assert_eq!(p.curvature, Curvature::Flat);
+    }
+
+    #[test]
+    fn grab_pull_is_amplified_when_far() {
+        let head = Vec3::new(0.0, 1.5, 0.0);
+        let p0 = PanelLayout { screen: 1, pose: from_glam(Vec3::new(0.0, 1.5, -2.5), Quat::IDENTITY), width_m: 1.0, curvature: Curvature::Flat };
+        let mut p = p0;
+        let c0 = Vec3::new(0.0, 1.3, -0.5);
+        let mut g = Grab::start(&p, c0, Quat::IDENTITY);
+        g.update(&mut p, c0, Quat::IDENTITY, head, 0.0, 0.0);
+        // Pull the hand 0.3 m toward the head in small steps.
+        for i in 1..=30 {
+            g.update(&mut p, c0 + Vec3::Z * 0.01 * i as f32, Quat::IDENTITY, head, 0.0, 0.0);
+        }
+        let z = p.pose.position[2];
+        assert!(z > -1.2, "one pull should bring a far panel close, z = {z}");
+        // Close panels move ~1:1 with the hand.
+        let mut p = PanelLayout { pose: from_glam(Vec3::new(0.0, 1.5, -0.8), Quat::IDENTITY), ..p0 };
+        let mut g = Grab::start(&p, c0, Quat::IDENTITY);
+        g.update(&mut p, c0, Quat::IDENTITY, head, 0.0, 0.0);
+        g.update(&mut p, c0 + Vec3::Z * 0.05, Quat::IDENTITY, head, 0.0, 0.0);
+        let moved = p.pose.position[2] + 0.8;
+        assert!(moved > 0.05 && moved < 0.06, "{moved}");
     }
 
     #[test]

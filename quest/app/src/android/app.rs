@@ -1408,8 +1408,16 @@ impl App {
         self.render_env(f, env_mode, cutout.as_ref())?;
         layers.projection(f.world, f.views, &self.env.sc, self.env.eye_w as i32, self.env.eye_h as i32, want_passthrough);
 
-        for p in &self.layout {
-            let Some(g) = self.panel_geom(p) else { continue };
+        // Compositor layers have no depth test: later layers cover earlier ones. Submit panels
+        // far to near so a closer panel is always drawn in front.
+        let head = self.head.0;
+        let mut panels: Vec<(f32, &PanelLayout, PanelGeom)> = self
+            .layout
+            .iter()
+            .filter_map(|p| self.panel_geom(p).map(|g| (g.center.distance_squared(head), p, g)))
+            .collect();
+        panels.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, p, g) in panels {
             let s = &self.screens[&p.screen];
             if !s.sc.released_once {
                 continue;
